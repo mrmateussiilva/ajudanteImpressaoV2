@@ -3,6 +3,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from cut_panel import PainelCutFrame
+from image_resizer import ImageResizerFrame
 from roler_packer import RoloPackerFrame
 from theme import ACCENT, ACCENT_HOVER, BG_CARD, BG_DARK, BG_INPUT, PANEL_HOVER, TEXT, set_theme_mode, setup_theme
 
@@ -80,6 +81,7 @@ class AjudanteImpressaoApp(ctk.CTk):
         tabs.grid(row=0, column=0, sticky="nsew")
         tabs.add("Rolo Packer")
         tabs.add("Cut Panel")
+        tabs.add("Redimensionar")
 
         rolo_tab = tabs.tab("Rolo Packer")
         rolo_tab.grid_rowconfigure(0, weight=1)
@@ -92,6 +94,12 @@ class AjudanteImpressaoApp(ctk.CTk):
         cut_tab.grid_columnconfigure(0, weight=1)
         self.cut_panel = PainelCutFrame(cut_tab)
         self.cut_panel.pack(fill="both", expand=True)
+
+        resize_tab = tabs.tab("Redimensionar")
+        resize_tab.grid_rowconfigure(0, weight=1)
+        resize_tab.grid_columnconfigure(0, weight=1)
+        self.image_resizer = ImageResizerFrame(resize_tab)
+        self.image_resizer.grid(row=0, column=0, sticky="nsew")
 
     def _change_theme(self, mode: str):
         set_theme_mode(mode)
