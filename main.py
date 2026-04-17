@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
+from automation import AutomationFrame
 from cut_panel import PainelCutFrame
 from image_resizer import ImageResizerFrame
 from roler_packer import RoloPackerFrame
@@ -82,6 +83,7 @@ class AjudanteImpressaoApp(ctk.CTk):
         tabs.add("Rolo Packer")
         tabs.add("Cut Panel")
         tabs.add("Redimensionar")
+        tabs.add("Automacao")
 
         rolo_tab = tabs.tab("Rolo Packer")
         rolo_tab.grid_rowconfigure(0, weight=1)
@@ -100,6 +102,12 @@ class AjudanteImpressaoApp(ctk.CTk):
         resize_tab.grid_columnconfigure(0, weight=1)
         self.image_resizer = ImageResizerFrame(resize_tab)
         self.image_resizer.grid(row=0, column=0, sticky="nsew")
+
+        automation_tab = tabs.tab("Automacao")
+        automation_tab.grid_rowconfigure(0, weight=1)
+        automation_tab.grid_columnconfigure(0, weight=1)
+        self.automation = AutomationFrame(automation_tab)
+        self.automation.grid(row=0, column=0, sticky="nsew")
 
     def _change_theme(self, mode: str):
         set_theme_mode(mode)

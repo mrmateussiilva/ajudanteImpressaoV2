@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import os
-import re
 
 import customtkinter as ctk
 from PIL import Image, ImageTk
 from tkinter import filedialog, messagebox
 
-from cut_processing import build_cut_points_from_measures, process_cut_folder, process_cut_images
+from cut_processing import build_cut_points_from_plate_width, process_cut_folder, process_cut_images
 from image_utils import cm_to_px, px_to_cm
 from theme import (
     ACCENT,
@@ -135,7 +134,7 @@ class PainelCutFrame(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self.tools_group,
-            text="Medidas das placas (cm)",
+            text="Largura da placa (cm)",
             font=ctk.CTkFont("Courier New", 11, "bold"),
             text_color=MUTED,
         ).pack(anchor="w", padx=15, pady=(10, 4))
@@ -149,7 +148,7 @@ class PainelCutFrame(ctk.CTkFrame):
             corner_radius=6,
         )
         self.measure_entry.pack(padx=15, pady=(0, 8), fill="x")
-        self.measure_entry.insert("1.0", "50, 50, 50")
+        self.measure_entry.insert("1.0", "150")
 
         ctk.CTkLabel(
             self.tools_group,
@@ -194,7 +193,7 @@ class PainelCutFrame(ctk.CTkFrame):
 
         self.lbl_measure_info = ctk.CTkLabel(
             self.tools_group,
-            text="Digite medidas separadas por virgula, espaco ou linha.",
+            text="Digite a largura unica da placa. Ex.: 150 cm.",
             text_color=MUTED,
             font=ctk.CTkFont("Courier New", 10),
             wraplength=250,
@@ -232,7 +231,7 @@ class PainelCutFrame(ctk.CTkFrame):
         self.mode_tabs.add("Lote")
 
         manual_tab = self.mode_tabs.tab("Manual")
-        manual_tab.grid_rowconfigure(1, weight=1)
+        manual_tab.grid_rowconfigure(2, weight=1)
         manual_tab.grid_columnconfigure(0, weight=1)
 
         self.info_panel = ctk.CTkFrame(manual_tab, height=40, corner_radius=8, fg_color=INFO_BAR)
@@ -242,8 +241,20 @@ class PainelCutFrame(ctk.CTkFrame):
         self.lbl_instruction = ctk.CTkLabel(self.info_panel, text="Carregue um gabarito e uma imagem para comecar.", font=ctk.CTkFont("Courier New", 13, "bold"), text_color="#ffffff")
         self.lbl_instruction.pack(pady=8)
 
+        self.summary_panel = ctk.CTkFrame(manual_tab, height=40, corner_radius=8, fg_color=BG_INPUT)
+        self.summary_panel.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self.summary_panel.pack_propagate(False)
+
+        self.lbl_plate_summary = ctk.CTkLabel(
+            self.summary_panel,
+            text="Placa alvo: - | Total calculado: -",
+            font=ctk.CTkFont("Courier New", 12, "bold"),
+            text_color=palette_color(CANVAS_TEXT),
+        )
+        self.lbl_plate_summary.pack(padx=12, pady=10, anchor="w")
+
         self.canvas_container = ctk.CTkFrame(manual_tab, corner_radius=10, fg_color=BG_INPUT)
-        self.canvas_container.grid(row=1, column=0, sticky="nsew")
+        self.canvas_container.grid(row=2, column=0, sticky="nsew")
         self.canvas_container.grid_rowconfigure(1, weight=1)
         self.canvas_container.grid_columnconfigure(1, weight=1)
 
@@ -353,6 +364,7 @@ class PainelCutFrame(ctk.CTkFrame):
         self.update_canvas_image()
         self.update_instruction_bar()
         self._update_dpi_info()
+        self._update_plate_summary()
 
     def update_instruction_bar(self):
         if self.original_image and self.template_image:
@@ -407,6 +419,7 @@ class PainelCutFrame(ctk.CTkFrame):
         self.canvas.delete("guide")
         self.canvas.delete("guide_label")
         self._update_measure_info()
+        self._update_plate_summary()
 
     def on_guide_press(self, event):
         items = self.canvas.find_closest(event.x, event.y)
@@ -444,66 +457,50 @@ class PainelCutFrame(ctk.CTkFrame):
         self.update_instruction_bar()
         self._update_measure_info()
         self._update_dpi_info()
+        self._update_plate_summary()
 
     def apply_measurements(self):
         if not self.original_image:
             messagebox.showwarning("Aviso", "Carregue a imagem principal primeiro.")
             return
 
-        measures_cm = self._parse_measurements()
-        if measures_cm is None:
+        plate_width_cm = self._parse_plate_width()
+        if plate_width_cm is None:
             return
 
         image_width_cm = self._image_width_cm()
-        total_cm = sum(measures_cm)
-        tolerance_cm = 0.2
-
-        if total_cm > image_width_cm + tolerance_cm:
+        if plate_width_cm > image_width_cm:
             messagebox.showerror(
                 "Erro",
-                f"As medidas somam {total_cm:.1f} cm, mas a imagem tem {image_width_cm:.1f} cm de largura.",
+                f"A placa tem {plate_width_cm:.1f} cm, mas a imagem tem {image_width_cm:.1f} cm de largura.",
             )
             return
-
-        cumulative = 0.0
-        positions = []
-        for value in measures_cm[:-1]:
-            cumulative += value
-            positions.append(cm_to_px(cumulative, dpi=self._image_dpi_x()))
-
-        if total_cm < image_width_cm - tolerance_cm:
-            remaining_cm = image_width_cm - total_cm
-            self.lbl_measure_info.configure(
-                text=f"Medidas aplicadas. Sobra final automatica: {remaining_cm:.1f} cm.",
-                text_color=ACCENT,
-            )
-        else:
-            self.lbl_measure_info.configure(
-                text=f"Medidas aplicadas. Total: {total_cm:.1f} cm.",
-                text_color=ACCENT,
-            )
-
-        self.guide_positions = sorted({max(1, min(pos, self.original_image.width - 1)) for pos in positions})
+        cut_points = build_cut_points_from_plate_width(
+            self.original_image,
+            plate_width_cm,
+            dpi_override=self._manual_dpi(),
+        )
+        self.guide_positions = cut_points[1:-1]
         self._redraw_guides()
         self._draw_rulers()
+        self._update_plate_summary()
 
-    def _parse_measurements(self) -> list[float] | None:
+    def _parse_plate_width(self) -> float | None:
         raw_text = self.measure_entry.get("1.0", "end").strip()
-        values = [chunk for chunk in re.split(r"[\s,;]+", raw_text) if chunk]
-        if not values:
-            messagebox.showwarning("Aviso", "Digite pelo menos uma medida em cm.")
+        if not raw_text:
+            messagebox.showwarning("Aviso", "Digite a largura da placa em cm.")
             return None
 
         try:
-            measures_cm = [float(value.replace(",", ".")) for value in values]
+            plate_width_cm = float(raw_text.replace(",", "."))
         except ValueError:
-            messagebox.showerror("Erro", "As medidas devem ser numeros em cm.")
+            messagebox.showerror("Erro", "A largura da placa deve ser um numero em cm.")
             return None
 
-        if any(value <= 0 for value in measures_cm):
-            messagebox.showerror("Erro", "Todas as medidas devem ser maiores que zero.")
+        if plate_width_cm <= 0:
+            messagebox.showerror("Erro", "A largura da placa deve ser maior que zero.")
             return None
-        return measures_cm
+        return plate_width_cm
 
     def _image_dpi_x(self) -> int:
         manual_dpi = self._manual_dpi()
@@ -535,6 +532,39 @@ class PainelCutFrame(ctk.CTkFrame):
         if not self.original_image:
             return 0.0
         return px_to_cm(self.original_image.height, dpi=self._image_dpi_x())
+
+    def _update_plate_summary(self):
+        if not self.original_image:
+            self.lbl_plate_summary.configure(text="Placa alvo: - | Total calculado: -", text_color=MUTED)
+            return
+
+        plate_width_cm = self._parse_plate_width_for_display()
+        boundaries = [0, *sorted(self.guide_positions), self.original_image.width]
+        total_plates = max(0, len(boundaries) - 1)
+
+        if plate_width_cm is None:
+            target_text = "Placa alvo: -"
+        else:
+            target_text = f"Placa alvo: {plate_width_cm:.1f} cm"
+
+        if total_plates <= 0:
+            summary = f"{target_text} | Total calculado: -"
+            color = MUTED
+        else:
+            summary = f"{target_text} | Total calculado: {total_plates} placa(s)"
+            color = ACCENT if plate_width_cm is not None else palette_color(CANVAS_TEXT)
+
+        self.lbl_plate_summary.configure(text=summary, text_color=color)
+
+    def _parse_plate_width_for_display(self) -> float | None:
+        raw_text = self.measure_entry.get("1.0", "end").strip()
+        if not raw_text:
+            return None
+        try:
+            plate_width_cm = float(raw_text.replace(",", "."))
+        except ValueError:
+            return None
+        return plate_width_cm if plate_width_cm > 0 else None
 
     def _redraw_guides(self):
         self.canvas.delete("guide")
@@ -584,7 +614,7 @@ class PainelCutFrame(ctk.CTkFrame):
     def _update_measure_info(self):
         if not self.original_image:
             self.lbl_measure_info.configure(
-                text="Digite medidas separadas por virgula, espaco ou linha.",
+                text="Digite a largura unica da placa. Ex.: 150 cm.",
                 text_color=MUTED,
             )
             return
@@ -598,7 +628,7 @@ class PainelCutFrame(ctk.CTkFrame):
 
         if measures:
             self.lbl_measure_info.configure(
-                text=f"Placas na tela: {' | '.join(measures)} cm",
+                text=f"{len(measures)} placa(s): {' | '.join(measures)} cm",
                 text_color=ACCENT,
             )
         else:
@@ -606,6 +636,7 @@ class PainelCutFrame(ctk.CTkFrame):
                 text=f"Largura total da imagem: {self._image_width_cm():.1f} cm",
                 text_color=MUTED,
             )
+        self._update_plate_summary()
 
     def _update_dpi_info(self):
         manual_dpi = self._manual_dpi()
@@ -624,6 +655,7 @@ class PainelCutFrame(ctk.CTkFrame):
             self._draw_rulers()
             if self.guide_positions:
                 self._redraw_guides()
+            self._update_plate_summary()
 
     def select_batch_folder(self):
         path = filedialog.askdirectory(title="Selecionar pasta para corte em lote")
@@ -646,8 +678,8 @@ class PainelCutFrame(ctk.CTkFrame):
             messagebox.showwarning("Aviso", "Selecione uma pasta para o lote.")
             return
 
-        measures_cm = self._parse_measurements()
-        if measures_cm is None:
+        plate_width_cm = self._parse_plate_width()
+        if plate_width_cm is None:
             return
 
         manual_dpi = self._manual_dpi()
@@ -660,7 +692,7 @@ class PainelCutFrame(ctk.CTkFrame):
             results = process_cut_folder(
                 folder_path=self.batch_folder,
                 template_image=self.template_image,
-                measures_cm=measures_cm,
+                plate_width_cm=plate_width_cm,
                 pad_cm=self.pad_cm,
                 dpi_override=manual_dpi,
             )
@@ -731,6 +763,7 @@ class PainelCutFrame(ctk.CTkFrame):
         self.batch_log.configure(text_color=palette_color(CANVAS_TEXT))
         self.measure_entry.configure(text_color=palette_color(CANVAS_TEXT))
         self.dpi_entry.configure(text_color=palette_color(CANVAS_TEXT))
+        self.lbl_plate_summary.configure(text_color=palette_color(CANVAS_TEXT))
         self._update_dpi_info()
         self.update_instruction_bar()
         self._draw_rulers()
@@ -757,12 +790,12 @@ class PainelCutFrame(ctk.CTkFrame):
             if self.guide_positions:
                 real_cut_points = [0, *sorted(self.guide_positions), self.original_image.width]
             else:
-                measures_cm = self._parse_measurements()
-                if measures_cm is None:
+                plate_width_cm = self._parse_plate_width()
+                if plate_width_cm is None:
                     return
-                real_cut_points = build_cut_points_from_measures(
+                real_cut_points = build_cut_points_from_plate_width(
                     self.original_image,
-                    measures_cm,
+                    plate_width_cm,
                     dpi_override=manual_dpi,
                 )
 

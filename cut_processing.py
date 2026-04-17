@@ -116,28 +116,27 @@ def resolve_image_dpi(image, dpi_override: int | None = None):
     return dpi
 
 
-def build_cut_points_from_measures(image, measures_cm: list[float], dpi_override: int | None = None):
+def build_cut_points_from_plate_width(image, plate_width_cm: float, dpi_override: int | None = None):
     dpi_x = resolve_image_dpi(image, dpi_override)[0]
     image_width_cm = px_to_cm(image.width, dpi=dpi_x)
-    tolerance_cm = 0.2
-    total_cm = sum(measures_cm)
-
-    if total_cm > image_width_cm + tolerance_cm:
+    if plate_width_cm <= 0:
+        raise ValueError("A largura da placa deve ser maior que zero.")
+    if plate_width_cm > image_width_cm:
         raise ValueError(
-            f"As medidas somam {total_cm:.1f} cm, mas a imagem tem {image_width_cm:.1f} cm de largura."
+            f"A placa tem {plate_width_cm:.1f} cm, mas a imagem tem {image_width_cm:.1f} cm de largura."
         )
 
     positions = []
-    cumulative = 0.0
-    for value in measures_cm[:-1]:
-        cumulative += value
+    cumulative = plate_width_cm
+    while cumulative < image_width_cm:
         positions.append(cm_to_px(cumulative, dpi=dpi_x))
+        cumulative += plate_width_cm
 
     cut_points = sorted({max(1, min(pos, image.width - 1)) for pos in positions})
     return [0, *cut_points, image.width]
 
 
-def process_cut_folder(folder_path: str, template_image, measures_cm: list[float], pad_cm: float, dpi_override: int | None = None):
+def process_cut_folder(folder_path: str, template_image, plate_width_cm: float, pad_cm: float, dpi_override: int | None = None):
     folder = Path(folder_path)
     files = sorted(f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in VALID_EXT)
     if not files:
@@ -146,7 +145,7 @@ def process_cut_folder(folder_path: str, template_image, measures_cm: list[float
     results = []
     for file in files:
         with Image.open(file) as image:
-            cut_points = build_cut_points_from_measures(image, measures_cm, dpi_override=dpi_override)
+            cut_points = build_cut_points_from_plate_width(image, plate_width_cm, dpi_override=dpi_override)
             output_dir, total_parts = process_cut_images(
                 original_image=image.copy(),
                 template_image=template_image,

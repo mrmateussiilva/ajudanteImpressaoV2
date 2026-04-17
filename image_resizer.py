@@ -4,10 +4,9 @@ import threading
 from pathlib import Path
 
 import customtkinter as ctk
-from PIL import Image
 from tkinter import filedialog, messagebox
 
-from image_utils import VALID_EXT, cm_to_px
+from image_resize_processing import process_resize_folder
 from theme import ACCENT, ACCENT2, ACCENT_HOVER, BG_CARD, BG_DARK, BG_INPUT, MUTED, PANEL_HOVER, TEXT
 
 
@@ -264,41 +263,22 @@ class ImageResizerFrame(ctk.CTkFrame):
 
     def _process(self, folder: Path, mode: str, target_value: float, output_name: str, destination_mode: str):
         try:
-            files = sorted(f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in VALID_EXT)
-            if not files:
+            self._set_status("Processando imagens...")
+            self._log_write(f"Modo: {mode}\n")
+            self._log_write(f"Valor alvo: {target_value}\n")
+            self._log_write(f"Destino: {'sobrescrever originais' if destination_mode == 'overwrite' else folder / output_name}\n\n")
+
+            try:
+                results = process_resize_folder(folder, mode, target_value, output_name, destination_mode)
+            except ValueError:
                 self._set_status("Nenhuma imagem encontrada.")
                 self._log_write("Nenhuma imagem compativel encontrada na pasta.\n")
                 return
 
-            output_dir = folder if destination_mode == "overwrite" else folder / output_name
-            if destination_mode != "overwrite":
-                output_dir.mkdir(exist_ok=True)
-
-            self._set_status("Processando imagens...")
-            self._log_write(f"Modo: {mode}\n")
-            self._log_write(f"Valor alvo: {target_value}\n")
-            self._log_write(f"Destino: {'sobrescrever originais' if destination_mode == 'overwrite' else output_dir}\n\n")
-
-            for file in files:
-                try:
-                    with Image.open(file) as img:
-                        scale = self._resolve_scale(img, mode, target_value)
-                        new_width = max(1, int(round(img.width * scale)))
-                        new_height = max(1, int(round(img.height * scale)))
-                        resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                        save_path = output_dir / file.name
-
-                        save_kwargs = {}
-                        dpi = img.info.get("dpi")
-                        if dpi:
-                            save_kwargs["dpi"] = dpi
-                        if "icc_profile" in img.info:
-                            save_kwargs["icc_profile"] = img.info["icc_profile"]
-
-                        resized.save(save_path, **save_kwargs)
-                        self._log_write(f"OK {file.name} -> {new_width}x{new_height}px (escala {scale:.3f})\n")
-                except Exception as e:
-                    self._log_write(f"ERRO {file.name}: {e}\n")
+            for result in results:
+                self._log_write(
+                    f"OK {result['file']} -> {result['width']}x{result['height']}px (escala {result['scale']:.3f})\n"
+                )
 
             self._set_status("Concluido.")
             self._log_write("\nLote finalizado.\n")
@@ -341,17 +321,6 @@ class ImageResizerFrame(ctk.CTkFrame):
         else:
             self._output_label.grid_remove()
             self._output_entry.grid_remove()
-
-    def _resolve_scale(self, img: Image.Image, mode: str, target_value: float) -> float:
-        if mode == "percent":
-            return target_value / 100.0
-        if mode == "width_px":
-            return target_value / img.width
-        dpi = img.info.get("dpi", (72, 72))[0]
-        if not dpi or dpi <= 0:
-            dpi = 72
-        target_px = cm_to_px(target_value, dpi=int(round(dpi)))
-        return target_px / img.width
 
     def _set_status(self, text: str):
         self.after(0, lambda: self._status_label.configure(text=text))
