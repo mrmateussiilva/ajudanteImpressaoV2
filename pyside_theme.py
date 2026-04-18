@@ -81,17 +81,17 @@ def build_stylesheet(theme_name: str) -> str:
         selection-background-color: {colors['accent']};
     }}
     QLineEdit#fieldInput {{
-        background: transparent;
-        border: 1px solid transparent;
+        background: {colors['card']};
+        border: 1px solid {colors['border']};
         border-radius: 8px;
-        min-height: 22px;
-        padding: 2px 0 0 0;
+        min-height: 34px;
+        padding: 6px 10px;
         color: {colors['text']};
         font-size: 14px;
         font-weight: 600;
     }}
     QLineEdit#fieldInput:focus {{
-        border-color: transparent;
+        border-color: {colors['accent']};
     }}
     QLineEdit#fieldInput[invalid="true"] {{
         color: #FF6B6B;

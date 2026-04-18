@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -68,8 +69,17 @@ class ArtFinisherWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
-        layout.addWidget(self._build_sidebar(), 0)
+        layout.addWidget(self._wrap_sidebar(self._build_sidebar(), 376), 0)
         layout.addWidget(self._build_main(), 1)
+
+    def _wrap_sidebar(self, widget: QWidget, width: int) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedWidth(width)
+        scroll.setWidget(widget)
+        return scroll
 
     def _build_sidebar(self) -> QWidget:
         frame = QFrame()
@@ -186,12 +196,13 @@ class ArtFinisherWidget(QWidget):
         card.setObjectName("fieldCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(4)
+        card_layout.setSpacing(6)
         label = label_text if not suffix else f"{label_text} ({suffix})"
         card_layout.addWidget(self._field_label(label))
         entry = QLineEdit()
         entry.setObjectName("fieldInput")
         entry.setText(default)
+        entry.setMinimumHeight(36)
         card_layout.addWidget(entry)
         grid.addWidget(card, row, column)
         return entry

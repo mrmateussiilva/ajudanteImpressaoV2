@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QScrollArea,
     QSizePolicy,
     QTabWidget,
     QVBoxLayout,
@@ -98,10 +99,19 @@ class RoloPackerWidget(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
 
-        sidebar = self._build_sidebar()
+        sidebar = self._wrap_sidebar(self._build_sidebar(), 376)
         main_panel = self._build_main()
         layout.addWidget(sidebar, 0)
         layout.addWidget(main_panel, 1)
+
+    def _wrap_sidebar(self, widget: QWidget, width: int) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFixedWidth(width)
+        scroll.setWidget(widget)
+        return scroll
 
     def _build_sidebar(self) -> QWidget:
         frame = QFrame()
@@ -291,12 +301,13 @@ class RoloPackerWidget(QWidget):
         card.setObjectName("fieldCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(4)
+        card_layout.setSpacing(6)
         label = label_text if not suffix else f"{label_text} ({suffix})"
         card_layout.addWidget(self._field_label(label))
         entry = QLineEdit()
         entry.setObjectName("fieldInput")
         entry.setText(default)
+        entry.setMinimumHeight(36)
         card_layout.addWidget(entry)
         grid.addWidget(card, row, column)
         return entry
@@ -306,11 +317,12 @@ class RoloPackerWidget(QWidget):
         card.setObjectName("fieldCard")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(4)
+        card_layout.setSpacing(6)
         card_layout.addWidget(self._field_label(label_text))
         entry = QLineEdit()
         entry.setObjectName("fieldInput")
         entry.setPlaceholderText(placeholder)
+        entry.setMinimumHeight(36)
         card_layout.addWidget(entry)
         layout.addWidget(card)
         return entry

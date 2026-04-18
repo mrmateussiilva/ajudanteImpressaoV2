@@ -56,6 +56,11 @@ python main.py
 - `*_processing.py`
   Logica de processamento de imagem.
 
+## Documentacao Tecnica
+
+- [docs/packing-algorithm.md](./docs/packing-algorithm.md)
+  Descreve os modos de encaixe e o funcionamento do algoritmo por mascara alfa.
+
 ## Observacoes
 
 - A interface legada em `CustomTkinter` foi removida do fluxo ativo.
