@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pyside_main import main
+from ajudante_impressao.ui.main_window import main
 
 
 if __name__ == "__main__":

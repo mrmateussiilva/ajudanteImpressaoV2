@@ -45,16 +45,16 @@ python main.py
 
 - [main.py](./main.py)
   Entrada principal da aplicacao.
-- [pyside_main.py](./pyside_main.py)
-  Janela principal Qt com abas e alternancia de tema claro/escuro.
-- [pyside_theme.py](./pyside_theme.py)
-  Tema centralizado da interface.
-- `pyside_*.py`
-  Widgets das ferramentas.
-- `*_service.py`
-  Camada de orquestracao desacoplada da UI.
-- `*_processing.py`
-  Logica de processamento de imagem.
+- [`ajudante_impressao/ui/`](./ajudante_impressao/ui)
+  Janela principal, tema e telas Qt.
+- [`ajudante_impressao/services/`](./ajudante_impressao/services)
+  Orquestracao de casos de uso da aplicacao.
+- [`ajudante_impressao/algorithms/`](./ajudante_impressao/algorithms)
+  Algoritmos e processamento de imagem.
+- [`ajudante_impressao/pipeline.py`](./ajudante_impressao/pipeline.py)
+  Workflow engine orientado por configuracao TOML.
+- `pyside_*.py`, `*_service.py`, `*_processing.py`
+  Shims de compatibilidade para a estrutura antiga.
 
 ## Documentacao Tecnica
 
