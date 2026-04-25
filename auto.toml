@@ -1,0 +1,31 @@
+[productions.painel]
+actions = ["painel_resize", "painel_cut"]
+
+[productions.totem]
+actions = ["totem_resize", "totem_finishing"]
+
+[actions.painel_resize]
+type = "resize"
+mode = "width_cm"
+target_value = 150
+destination_mode = "subfolder"
+output_name = "01_REDIMENSIONADAS"
+
+[actions.painel_cut]
+type = "cut"
+template_path = "templates/gabarito-painel.png"
+plate_width_cm = 150
+pad_cm = 1.0
+dpi_override = 100
+
+[actions.totem_resize]
+type = "resize"
+mode = "percent"
+target_value = 100
+destination_mode = "subfolder"
+output_name = "01_REDIMENSIONADAS"
+
+[actions.totem_finishing]
+type = "finishing"
+output_name = "02_ACABAMENTO"
+side_mode = "auto"
