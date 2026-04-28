@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from typing import List
 
+import cv2
 import numpy as np
 from PIL import Image
+
+try:
+    import numba
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
 
 from .image_ops import fit_width, resize_to_height, trim_empty_borders
 
@@ -14,12 +21,13 @@ def pack_images_gallery(images: List[Image.Image], max_width: int, spacing: int,
 
     for img in images:
         img = trim_empty_borders(img)
-        if allow_rotate and img.height > img.width * 1.8:
-            rot = img.rotate(90, expand=True)
-            if rot.width <= usable_width:
-                img = rot
-        img = resize_to_height(img, row_height)
-        img = fit_width(img, usable_width)
+        if allow_rotate:
+            # Se for mais largo que o rolo mas couber em pé, rotaciona
+            if img.width > usable_width and img.height <= usable_width:
+                img = img.rotate(90, expand=True)
+            # Se for muito alto e couber deitado, rotaciona para economizar altura
+            elif img.height > img.width * 1.5 and img.height <= usable_width:
+                img = img.rotate(90, expand=True)
         prepared.append(img)
 
     prepared.sort(key=lambda im: (im.width * im.height), reverse=True)
@@ -47,16 +55,7 @@ def pack_images_gallery(images: List[Image.Image], max_width: int, spacing: int,
         total_w = sum(im.width for im in row_imgs)
         gaps = spacing * (len(row_imgs) - 1)
         row_total = total_w + gaps
-        scale = min(1.18, usable_width / row_total) if row_total > 0 else 1.0
-
-        scaled_row = []
-        for im in row_imgs:
-            if scale != 1.0:
-                new_w = max(1, int(round(im.width * scale)))
-                new_h = max(1, int(round(im.height * scale)))
-                scaled_row.append(im.resize((new_w, new_h), Image.Resampling.LANCZOS))
-            else:
-                scaled_row.append(im)
+        scaled_row = row_imgs # Sem redimensionamento automático
 
         row_h = max(im.height for im in scaled_row)
         total_w = sum(im.width for im in scaled_row)
@@ -81,12 +80,15 @@ def pack_images_fast(images: List[Image.Image], max_width: int, spacing: int, ma
 
     for img in images:
         img = trim_empty_borders(img)
-        if allow_rotate and img.height > img.width and img.height <= usable_width:
-            rotated = img.rotate(90, expand=True)
-            if rotated.width <= usable_width and rotated.height < img.height:
-                img = rotated
-        if img.width > usable_width:
-            img = fit_width(img, usable_width)
+        if allow_rotate:
+            # Prioridade 1: Rotacionar se for mais largo que o rolo
+            if img.width > usable_width and img.height <= usable_width:
+                img = img.rotate(90, expand=True)
+            # Prioridade 2: Rotacionar se for muito alto para economizar altura
+            elif img.height > img.width and img.height <= usable_width:
+                rotated = img.rotate(90, expand=True)
+                if rotated.width <= usable_width:
+                    img = rotated
         prepared.append(img)
 
     prepared.sort(key=lambda im: (im.height, im.width), reverse=True)
@@ -138,8 +140,6 @@ def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, m
 
         normalized_variants = []
         for variant in variants:
-            if variant.width > usable_width:
-                variant = fit_width(variant, usable_width)
             normalized_variants.append(variant)
 
         best_variant = max(normalized_variants, key=lambda im: (im.width * im.height, im.width, im.height))
@@ -157,9 +157,7 @@ def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, m
         x_end = max_width - margin - w
 
         if x_end < x_start:
-            img = fit_width(img, usable_width)
-            w, h = img.size
-            x_end = max_width - margin - w
+            x_end = x_start  # Manter no início se for maior que o rolo
 
         best_x = margin
         best_y = None
@@ -190,7 +188,8 @@ def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, m
 
 
 def _alpha_mask(img: Image.Image) -> np.ndarray:
-    return np.array(img.getchannel("A"), dtype=np.uint8) > 0
+    mask = np.array(img.getchannel("A"), dtype=np.uint8)
+    return (mask > 0).astype(np.uint8)
 
 
 def _quantize(value: int, step: int, minimum: int) -> int:
@@ -203,16 +202,17 @@ def _prepare_mask_variants(img: Image.Image, usable_width: int, allow_rotate: bo
     img = trim_empty_borders(img)
     angle_candidates = [0]
     if allow_rotate:
-        angle_candidates.extend([90, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75])
+        # Busca mais agressiva de ângulos: 0, 90, 180, 270 e variações de 15 e 45 graus
+        angle_candidates.extend([90, 180, 270, 15, -15, 30, -30, 45, 135, 225, 315, 60, -60])
 
     variants: list[dict] = []
     seen: set[tuple[int, int, int]] = set()
 
     for angle in angle_candidates:
         variant = img if angle == 0 else trim_empty_borders(img.rotate(angle, expand=True))
+        # Removido redimensionamento automático para preservar dimensões originais
         if variant.width > usable_width:
-            variant = fit_width(variant, usable_width)
-            variant = trim_empty_borders(variant)
+            pass
         if variant.width > usable_width or variant.width <= 0 or variant.height <= 0:
             continue
 
@@ -231,64 +231,134 @@ def _prepare_mask_variants(img: Image.Image, usable_width: int, allow_rotate: bo
 def _ensure_height(occupancy: np.ndarray, min_height: int) -> np.ndarray:
     if min_height <= occupancy.shape[0]:
         return occupancy
-    growth = max(min_height, occupancy.shape[0] * 2)
-    expanded = np.zeros((growth, occupancy.shape[1]), dtype=bool)
+    # Crescimento controlado: apenas o necessário + margem de segurança
+    growth = min_height + 512 
+    expanded = np.zeros((growth, occupancy.shape[1]), dtype=np.uint8)
     expanded[: occupancy.shape[0], :] = occupancy
     return expanded
+
+
+if HAS_NUMBA:
+    @numba.njit(nogil=True)
+    def _collides_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int) -> bool:
+        h, w = mask.shape
+        # Short-circuit loop: para no primeiro pixel que colidir
+        for i in range(h):
+            for j in range(w):
+                if mask[i, j] > 0 and occupancy[y + i, x + j] > 0:
+                    return True
+        return False
+
+    @numba.njit(nogil=True)
+    def _nudge_gravity_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, margin: int) -> tuple[int, int]:
+        cx, cy = x, y
+        for _ in range(2):
+            while cy - 1 >= margin and not _collides_jit(occupancy, mask, cx, cy - 1):
+                cy -= 1
+            while cx - 1 >= margin and not _collides_jit(occupancy, mask, cx - 1, cy):
+                cx -= 1
+        return cx, cy
+
+    @numba.njit(nogil=True)
+    def _evaluate_batch_jit(occupancy: np.ndarray, mask: np.ndarray, candidates: np.ndarray, max_y_used: int):
+        # Avalia um lote de candidatos em paralelo (aproveita todos os cores)
+        num = len(candidates)
+        scores = np.full((num, 4), 99999999, dtype=np.int32)
+        h_mask = mask.shape[0]
+        
+        for i in range(num):
+            fx, fy = candidates[i]
+            if not _collides_jit(occupancy, mask, fx, fy):
+                bottom = fy + h_mask
+                scores[i, 0] = max(bottom, max_y_used)
+                scores[i, 1] = bottom
+                scores[i, 2] = fy
+                scores[i, 3] = fx
+        
+        best_idx = -1
+        best_val = (99999999, 99999999, 99999999, 99999999)
+        for i in range(num):
+            s = (scores[i, 0], scores[i, 1], scores[i, 2], scores[i, 3])
+            if s < best_val:
+                best_val = s
+                best_idx = i
+        return best_idx, best_val
+
+else:
+    _collides_jit = None
+    _nudge_gravity_jit = None
+    _evaluate_batch_jit = None
 
 
 def _collides(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int) -> bool:
     h, w = mask.shape
     if y < 0 or x < 0 or y + h > occupancy.shape[0] or x + w > occupancy.shape[1]:
         return True
+    
+    if HAS_NUMBA and _collides_jit is not None:
+        return _collides_jit(occupancy, mask, x, y)
+        
     return bool(np.any(occupancy[y:y + h, x:x + w] & mask))
 
 
 def _stamp_reserved(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, spacing: int, margin: int, max_width: int) -> None:
-    h, w = mask.shape
-    x0 = max(margin, x - spacing)
-    y0 = max(margin, y - spacing)
-    x1 = min(max_width - margin, x + w + spacing)
-    y1 = y + h + spacing
-    if x0 >= x1 or y0 >= y1:
-        return
-
-    region_h = y1 - y0
-    region_w = x1 - x0
-    reserve = np.zeros((region_h, region_w), dtype=bool)
-    dest_x0 = x - x0
-    dest_y0 = y - y0
-    reserve[dest_y0:dest_y0 + h, dest_x0:dest_x0 + w] = mask
-    source = reserve.copy()
-
     if spacing > 0:
-        for dy in range(-spacing, spacing + 1):
-            for dx in range(-spacing, spacing + 1):
-                if abs(dx) + abs(dy) > spacing:
-                    continue
-                src_y0 = max(0, -dy)
-                src_y1 = min(region_h, region_h - dy) if dy >= 0 else region_h
-                src_x0 = max(0, -dx)
-                src_x1 = min(region_w, region_w - dx) if dx >= 0 else region_w
-                dst_y0 = max(0, dy)
-                dst_y1 = dst_y0 + (src_y1 - src_y0)
-                dst_x0 = max(0, dx)
-                dst_x1 = dst_x0 + (src_x1 - src_x0)
-                reserve[dst_y0:dst_y1, dst_x0:dst_x1] |= source[src_y0:src_y1, src_x0:src_x1]
+        y_idx, x_idx = np.ogrid[-spacing:spacing+1, -spacing:spacing+1]
+        # Kernel circular para um encaixe mais natural em cantos
+        kernel = (x_idx**2 + y_idx**2 <= spacing**2).astype(np.uint8)
+        padded = cv2.copyMakeBorder(mask, spacing, spacing, spacing, spacing, cv2.BORDER_CONSTANT, value=0)
+        dilated = cv2.dilate(padded, kernel)
+    else:
+        dilated = mask
+        spacing = 0
 
-    occupancy[y0:y1, x0:x1] |= reserve
+    h, w = dilated.shape
+    ox = x - spacing
+    oy = y - spacing
+    occ_h, occ_w = occupancy.shape
+    
+    src_x0 = 0
+    src_y0 = 0
+    src_x1 = w
+    src_y1 = h
+
+    dst_x0 = ox
+    dst_y0 = oy
+    dst_x1 = ox + w
+    dst_y1 = oy + h
+
+    left_bound = margin
+    right_bound = max_width - margin
+    
+    if dst_x0 < left_bound:
+        src_x0 += (left_bound - dst_x0)
+        dst_x0 = left_bound
+    if dst_x1 > right_bound:
+        src_x1 -= (dst_x1 - right_bound)
+        dst_x1 = right_bound
+        
+    if dst_y0 < margin:
+        src_y0 += (margin - dst_y0)
+        dst_y0 = margin
+    if dst_y1 > occ_h:
+        src_y1 -= (dst_y1 - occ_h)
+        dst_y1 = occ_h
+
+    if src_x0 < src_x1 and src_y0 < src_y1:
+        occupancy[dst_y0:dst_y1, dst_x0:dst_x1] |= dilated[src_y0:src_y1, src_x0:src_x1]
 
 
 def _score_candidate(mask: np.ndarray, x: int, y: int, max_width: int, margin: int, max_y_used: int) -> tuple[int, int, int, int]:
-    h, w = mask.shape
-    bottom = y + h
-    side_gap = min(x - margin, max_width - margin - (x + w))
-    box_area = w * h
-    local_waste = box_area - int(mask.sum())
-    return (max(bottom, max_y_used), bottom, local_waste, -side_gap)
+    bottom = y + mask.shape[0]
+    # Prioridade 1: Minimizar o aumento do rolo
+    # Prioridade 2: Minimizar a base da peça (quanto mais alto melhor)
+    # Prioridade 3: Minimizar o topo da peça (quanto mais alto melhor)
+    # Prioridade 4: Favorecer encostar nas bordas (x pequeno ou x grande)
+    center_dist = abs(x + mask.shape[1] // 2 - max_width // 2)
+    return (max(bottom, max_y_used), bottom, y, -center_dist)
 
 
-def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False):
+def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, progress_cb=None):
     usable_width = max_width - 2 * margin
     prepared = []
     for img in images:
@@ -308,93 +378,195 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
         )
 
     prepared.sort(key=lambda item: item["sort_key"], reverse=True)
-    occupancy = np.zeros((max(64, margin * 2 + 1), max_width), dtype=bool)
+    occupancy = np.zeros((max(64, margin * 2 + 1), max_width), dtype=np.uint8)
     placed = []
-    candidates: set[tuple[int, int]] = {(margin, margin)}
     step = max(1, step)
     max_y_used = margin
+    
+    total_count = len(prepared)
 
-    for piece in prepared:
+    for i, piece in enumerate(prepared):
+        if progress_cb:
+            progress_cb(i, total_count)
         best_choice = None
-        ordered_candidates = sorted(candidates, key=lambda point: (point[1], point[0]))
 
-        for x_raw, y_raw in ordered_candidates[:400]:
-            x_base = _quantize(x_raw, step, margin)
-            y_base = _quantize(y_raw, step, margin)
+        for variant in piece["variants"]:
+            img = variant["image"]
+            mask = variant["mask"]
+            w, h = img.size
+            variant_best = None
+            
+            # Garantir que a área de busca seja suficiente
+            search_h = max_y_used + spacing + h + step
+            occupancy = _ensure_height(occupancy, search_h)
+            
+            # --- BUSCA MULTI-ESCALA (COARSE-TO-FINE) ---
+            # Aumentamos a precisão (fator menor) para garantir encaixes perfeitos
+            if w < max_width * 0.15 or h < 150:
+                factor = 1  # Busca direta em escala cheia para peças pequenas
+            else:
+                factor = 2  # No máximo 2x para peças grandes (muito mais preciso que 4x)
+            
+            try:
+                if factor > 1:
+                    mask_c = cv2.resize(mask, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                    occ_slice = occupancy[:search_h, :]
+                    occ_c = cv2.resize(occ_slice, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                    res_c = cv2.matchTemplate(occ_c, mask_c, cv2.TM_CCORR)
+                    
+                    # BUSCA EXAUSTIVA: Agora olhamos o rolo inteiro sem limite de linhas
+                    for cy in range(margin // factor, res_c.shape[0]):
+                        row_c = res_c[cy, (margin // factor) : (max_width - w) // factor + 1]
+                        promising_cx_indices = np.where(row_c < 1.0)[0] 
+                        
+                        if promising_cx_indices.size > 0:
+                            found_any_in_coarse = True
+                            
+                            # Coletar candidatos para avaliação em lote (paralelo)
+                            batch = []
+                            # Reduzimos o step para um encaixe muito mais fino
+                            fine_step = max(2, step // 2)
+                            
+                            for pcx in promising_cx_indices:
+                                base_x = (margin // factor + pcx) * factor
+                                base_y = cy * factor
+                                for fy in range(max(margin, base_y - factor), base_y + factor + 1, fine_step):
+                                    for fx in range(max(margin, base_x - factor), min(max_width - margin - w, base_x + factor + 1), fine_step):
+                                        batch.append((fx, fy))
+                            
+                            if batch and HAS_NUMBA and _evaluate_batch_jit is not None:
+                                idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used)
+                                if idx != -1:
+                                    if variant_best is None or score < variant_best["score"]:
+                                        bx, by = batch[idx]
+                                        variant_best = {"image": img, "mask": mask, "x": bx, "y": by, "score": score}
+                            else:
+                                # Fallback se batch for pequeno ou sem Numba
+                                for fx, fy in batch:
+                                    if not _collides(occupancy, mask, fx, fy):
+                                        score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                        if variant_best is None or score < variant_best["score"]:
+                                            variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
+                    
+                    if not found_any_in_coarse:
+                        raise Exception("No coarse match")
+                else:
+                    # Busca direta para peças pequenas (factor=1)
+                    y_limit = max_y_used + spacing
+                    for fy in range(margin, y_limit + 1, step):
+                        found_at_fy = False
+                        for fx in range(margin, max_width - margin - w + 1, step):
+                            if not _collides(occupancy, mask, fx, fy):
+                                score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                if variant_best is None or score < variant_best["score"]:
+                                    variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
+                                    found_at_fy = True
+                        if found_at_fy and variant_best["score"][1] < max_y_used:
+                            break # Encontramos uma vaga num "buraco" acima do final do rolo
 
-            for variant in piece["variants"]:
-                img = variant["image"]
-                mask = variant["mask"]
-                w, h = img.size
-                if x_base + w > max_width - margin:
-                    continue
-
-                occupancy = _ensure_height(occupancy, y_base + h + spacing + margin + step)
-                if _collides(occupancy, mask, x_base, y_base):
-                    continue
-
-                score = _score_candidate(mask, x_base, y_base, max_width, margin, max_y_used)
-                if best_choice is None or score < best_choice["score"]:
-                    best_choice = {"image": img, "mask": mask, "x": x_base, "y": y_base, "score": score}
-
-        if best_choice is None:
-            placed_successfully = False
-            search_limit = max_y_used + max(variant["image"].height for variant in piece["variants"]) + spacing + margin
-            y = margin
-            while y <= search_limit and not placed_successfully:
-                for variant in piece["variants"]:
-                    img = variant["image"]
-                    mask = variant["mask"]
-                    w, h = img.size
+            except Exception:
+                # Fallback para busca manual total se a miniatura falhar
+                y = margin
+                while y <= max_y_used + spacing:
                     x = margin
+                    found_at_y = False
                     while x + w <= max_width - margin:
-                        occupancy = _ensure_height(occupancy, y + h + spacing + margin + step)
                         if not _collides(occupancy, mask, x, y):
                             score = _score_candidate(mask, x, y, max_width, margin, max_y_used)
-                            best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
-                            placed_successfully = True
+                            variant_best = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
+                            found_at_y = True
                             break
                         x += step
-                    if placed_successfully:
+                    if found_at_y:
                         break
-                y += step
+                    y += step
+                
+            if variant_best is not None:
+                if best_choice is None or variant_best["score"] < best_choice["score"]:
+                    best_choice = variant_best
 
         if best_choice is None:
             fallback = piece["variants"][0]
             img = fallback["image"]
             mask = fallback["mask"]
             x = margin
-            y = _quantize(max_y_used + spacing, step, margin)
+            y = max_y_used + spacing
             occupancy = _ensure_height(occupancy, y + img.height + spacing + margin + step)
-            while _collides(occupancy, mask, x, y):
-                y += step
-                occupancy = _ensure_height(occupancy, y + img.height + spacing + margin + step)
+            while x + img.width <= max_width - margin:
+                if not _collides(occupancy, mask, x, y):
+                    break
+                x += step
             best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used)}
 
         img = best_choice["image"]
         mask = best_choice["mask"]
         x = best_choice["x"]
         y = best_choice["y"]
+
+        # --- REFINAMENTO DE GRAVIDADE (NUDGE) ---
+        if HAS_NUMBA and _nudge_gravity_jit is not None:
+            x, y = _nudge_gravity_jit(occupancy, mask, x, y, margin)
+        else:
+            for _ in range(2):
+                while y - 1 >= margin and not _collides(occupancy, mask, x, y - 1):
+                    y -= 1
+                while x - 1 >= margin and not _collides(occupancy, mask, x - 1, y):
+                    x -= 1
+
         placed.append((img, x, y))
         _stamp_reserved(occupancy, mask, x, y, spacing, margin, max_width)
         max_y_used = max(max_y_used, y + img.height)
-
-        candidates.discard((x, y))
-        candidates.add((x + img.width + spacing, y))
-        candidates.add((x, y + img.height + spacing))
-        candidates.add((x + max(1, img.width // 2), y + img.height + spacing))
-        candidates = {
-            (_quantize(cx, step, margin), _quantize(cy, step, margin))
-            for cx, cy in candidates
-            if cx < max_width - margin and cy <= max_y_used + 4 * step + spacing + margin
-        }
 
     final_height = max_y_used + margin
     return placed, max_width, final_height
 
 
+if HAS_NUMBA:
+    @numba.njit(nogil=True)
+    def _blend_canvas_jit(canvas: np.ndarray, img: np.ndarray, x: int, y: int):
+        h, w = img.shape[:2]
+        ch, cw = canvas.shape[:2]
+        y1, x1 = min(y + h, ch), min(x + w, cw)
+        ih, iw = y1 - y, x1 - x
+        if ih <= 0 or iw <= 0:
+            return
+
+        for i in range(ih):
+            for j in range(iw):
+                alpha = img[i, j, 3]
+                if alpha == 255:
+                    canvas[y + i, x + j] = img[i, j]
+                elif alpha > 0:
+                    a = alpha / 255.0
+                    inv_a = 1.0 - a
+                    for c in range(3):
+                        new_val = img[i, j, c] * a + canvas[y + i, x + j, c] * inv_a
+                        canvas[y + i, x + j, c] = np.uint8(new_val)
+                    # Preservar o maior alpha ou marcar como opaco se o fundo for 255
+                    canvas[y + i, x + j, 3] = max(alpha, canvas[y + i, x + j, 3])
+
+
 def build_canvas(packed, width, height):
-    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    # Composição ultra rápida usando Numba Parallel
+    canvas_arr = np.zeros((height, width, 4), dtype=np.uint8)
+    canvas_arr[:, :, :3] = 255  # Fundo branco
+    canvas_arr[:, :, 3] = 255   # Alpha opaco para o fundo
+    
     for img, x, y in packed:
-        canvas.alpha_composite(img, (x, y))
-    return canvas
+        img_arr = np.array(img.convert("RGBA"))
+        if HAS_NUMBA:
+            _blend_canvas_jit(canvas_arr, img_arr, x, y)
+        else:
+            # Fallback NumPy (lento)
+            h_img, w_img = img_arr.shape[:2]
+            y1, x1 = min(y + h_img, height), min(x + w_img, width)
+            h_fit, w_fit = y1 - y, x1 - x
+            if h_fit <= 0 or w_fit <= 0: continue
+            
+            target = canvas_arr[y:y1, x:x1].astype(np.float32)
+            source = img_arr[:h_fit, :w_fit].astype(np.float32)
+            alpha = source[:, :, 3:4] / 255.0
+            target[:, :, :3] = (source[:, :, :3] * alpha + target[:, :, :3] * (1 - alpha))
+            canvas_arr[y:y1, x:x1] = target.astype(np.uint8)
+        
+    return Image.fromarray(canvas_arr, "RGBA")

@@ -6,6 +6,8 @@ from typing import Callable
 
 from PIL import Image
 
+Image.MAX_IMAGE_PIXELS = None  # Permitir processar imagens muito grandes
+
 from ..algorithms.image_ops import cm_to_px, process_images, rgba_to_white_background
 from ..algorithms.packing import build_canvas, pack_images_fast, pack_images_gallery, pack_images_masked, pack_images_tight
 
@@ -40,6 +42,7 @@ class RollerPackRequest:
 @dataclass(slots=True)
 class RollerPackResult:
     output_path: Path
+    output_paths: list[Path]
     packed_count: int
     final_width_px: int
     final_height_px: int
@@ -62,7 +65,11 @@ def run_roll_packer(
     usable_width = max(1, roll_px - 2 * margin_px)
     effective_step = max(1, int(round(max(1, request.step_px) * profile["step_multiplier"])))
 
+    from ..algorithms.packing import HAS_NUMBA
+    perf_msg = " [TURBO MODE: Numba Ativo]" if HAS_NUMBA else " [MODO LENTO: Numba não detectado]"
+    
     log_fn(f"{'─' * 58}\n", "muted")
+    log_fn(f"  {perf_msg}\n", "ok" if HAS_NUMBA else "warn")
     log_fn(f"  Rolo: {request.largura_cm}cm = {roll_px}px\n", "info")
     log_fn(f"  Margem: {request.margem_cm}cm = {margin_px}px\n", "info")
     log_fn(f"  Espacamento: {request.espaco_cm}cm = {spacing_px}px\n", "info")
@@ -107,6 +114,11 @@ def run_roll_packer(
         )
     elif request.packing_mode == "masked":
         log_fn("\nCalculando layout poligonal por mascara alfa...\n", "info")
+        
+        def progress_callback(current, total):
+            if current % 5 == 0 or current == total:
+                log_fn(f"    Encaixando imagem {current} de {total}...\n", "muted")
+
         packed, final_w, final_h = pack_images_masked(
             images=images,
             max_width=roll_px,
@@ -114,6 +126,7 @@ def run_roll_packer(
             margin=margin_px,
             step=effective_step,
             allow_rotate=request.allow_rotate,
+            progress_cb=progress_callback
         )
     else:
         log_fn("\nCalculando layout compacto...\n", "info")
@@ -137,14 +150,41 @@ def run_roll_packer(
     final_jpeg = rgba_to_white_background(final)
 
     output_path = request.folder / request.output_name
-    final_jpeg.save(str(output_path), format="JPEG", dpi=(100, 100), quality=profile["jpeg_quality"])
+    output_paths = [output_path]
 
-    log_fn(f"\nSalvo em:\n    {output_path}\n", "ok")
+    # Limite do JPEG é 65535 pixels. Vamos usar 65000 por segurança.
+    MAX_JPEG_DIM = 65000
+    
+    if final_h > MAX_JPEG_DIM:
+        log_fn(f"\n  ⚠  Imagem muito longa para um único JPEG ({final_h}px).\n", "warn")
+        log_fn(f"  Dividindo em partes de no máximo {MAX_JPEG_DIM}px...\n", "info")
+        
+        output_paths = []
+        num_parts = (final_h + MAX_JPEG_DIM - 1) // MAX_JPEG_DIM
+        
+        for i in range(num_parts):
+            y0 = i * MAX_JPEG_DIM
+            y1 = min((i + 1) * MAX_JPEG_DIM, final_h)
+            part = final_jpeg.crop((0, y0, final_w, y1))
+            
+            part_name = f"{output_path.stem}_parte{i+1}.jpg"
+            part_path = output_path.parent / part_name
+            part.save(str(part_path), format="JPEG", dpi=(100, 100), quality=profile["jpeg_quality"])
+            output_paths.append(part_path)
+            log_fn(f"    ✓ Parte {i+1} salva: {part_name}\n", "ok")
+        
+        # Mantemos o output_path original como a primeira parte para compatibilidade
+        output_path = output_paths[0]
+    else:
+        final_jpeg.save(str(output_path), format="JPEG", dpi=(100, 100), quality=profile["jpeg_quality"])
+        log_fn(f"\nSalvo em:\n    {output_path}\n", "ok")
+
     log_fn(f"    {len(packed)} imagens posicionadas.\n", "ok")
     log_fn(f"\n{'─' * 58}\n", "muted")
 
     return RollerPackResult(
         output_path=output_path,
+        output_paths=output_paths,
         packed_count=len(packed),
         final_width_px=final_w,
         final_height_px=final_h,

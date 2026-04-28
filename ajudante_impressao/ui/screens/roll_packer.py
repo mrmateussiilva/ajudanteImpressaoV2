@@ -156,7 +156,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             ("Poligonal - Mascara alfa", "masked"),
         ):
             radio = QRadioButton(text)
-            if value == "gallery":
+            if value == "fast":
                 radio.setChecked(True)
             self.mode_group.addButton(radio)
             self.mode_radios[value] = radio
@@ -231,8 +231,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.debug_list.setViewMode(QListWidget.ViewMode.IconMode)
         self.debug_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.debug_list.setMovement(QListWidget.Movement.Static)
-        self.debug_list.setSpacing(12)
-        self.debug_list.setIconSize(QPixmap(120, 120).size())
+        self.debug_list.setSpacing(16)
         layout.addWidget(self.debug_list)
         return widget
 
@@ -379,18 +378,52 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         visible_items = payload.image_items if payload.debug_limit <= 0 else payload.image_items[: payload.debug_limit]
         for item in visible_items:
             preview = item["image"].copy()
-            preview.thumbnail((120, 120), Image.Resampling.LANCZOS)
-            pixmap = pil_to_qpixmap(_checkerboard_image(preview, block=12))
+            preview.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            pixmap = pil_to_qpixmap(_checkerboard_image(preview, block=16))
             self._debug_pixmaps.append(pixmap)
 
-            list_item = QListWidgetItem()
-            list_item.setIcon(QIcon(pixmap))
-            list_item.setText(
-                f"{item['name']}\n{item['width_px']}×{item['height_px']} px\n{item['width_cm']:.1f} × {item['height_cm']:.1f} cm"
+            card = QFrame()
+            card.setStyleSheet(
+                "QFrame {"
+                "    background-color: rgba(30, 30, 46, 0.6);"
+                "    border-radius: 8px;"
+                "    border: 1px solid rgba(255, 255, 255, 0.1);"
+                "}"
             )
-            list_item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
-            list_item.setSizeHint(list_item.sizeHint().expandedTo(self.debug_list.iconSize()))
-            self.debug_list.addItem(list_item)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 12, 12, 12)
+            card_layout.setSpacing(6)
+
+            img_lbl = QLabel()
+            img_lbl.setPixmap(pixmap)
+            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img_lbl.setStyleSheet("border: none; background: transparent;")
+            card_layout.addWidget(img_lbl, 1)
+
+            name_lbl = QLabel(item['name'])
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            font = name_lbl.font()
+            font.setBold(True)
+            name_lbl.setFont(font)
+            name_lbl.setStyleSheet("border: none; background: transparent; color: #CDD6F4;")
+            
+            metrics = name_lbl.fontMetrics()
+            elided_name = metrics.elidedText(item['name'], Qt.TextElideMode.ElideRight, 196)
+            name_lbl.setText(elided_name)
+            name_lbl.setToolTip(item['name'])
+
+            card_layout.addWidget(name_lbl)
+
+            dim_lbl = QLabel(f"{item['width_cm']:.1f} × {item['height_cm']:.1f} cm")
+            dim_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            dim_lbl.setStyleSheet("border: none; background: transparent; color: #A6ADC8; font-size: 11px;")
+            card_layout.addWidget(dim_lbl)
+
+            card.setFixedSize(220, 260)
+
+            list_item = QListWidgetItem(self.debug_list)
+            list_item.setSizeHint(card.size())
+            self.debug_list.setItemWidget(list_item, card)
 
     def _set_running(self, running: bool) -> None:
         self.run_button.setEnabled(not running)
@@ -411,7 +444,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget is not self.preview_label:
                 widget.deleteLater()
 
 

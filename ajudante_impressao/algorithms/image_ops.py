@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
-from concurrent.futures import ThreadPoolExecutor
+import shutil
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -89,6 +91,52 @@ def rgba_to_white_background(img: Image.Image) -> Image.Image:
     return background
 
 
+def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict[str, Any]:
+    try:
+        with Image.open(file) as im:
+            im = ImageOps.exif_transpose(im)
+            im = normalize_to_100dpi(im)
+            im = remove_white(im, threshold=threshold, softness=18)
+            im = crop_transparent(im)
+
+            if im.mode != "RGBA":
+                im = im.convert("RGBA")
+
+            if im.width > max_width_px:
+                resize_log = f"  ⚠  '{file.name}' ({px_to_cm(im.width):.1f}cm) é mais larga que o rolo ({px_to_cm(max_width_px):.1f}cm)!"
+            else:
+                resize_log = None
+
+            im = crop_transparent(im)
+            processed = im.copy()
+            image_item = {
+                "name": file.name,
+                "image": processed,
+                "width_px": processed.width,
+                "height_px": processed.height,
+                "width_cm": px_to_cm(processed.width),
+                "height_cm": px_to_cm(processed.height),
+            }
+            return {
+                "item": image_item,
+                "logs": [*([resize_log] if resize_log else []), f"  ✓  {file.name}  ({im.width}×{im.height}px)"],
+                "levels": [*(["warn"] if resize_log else []), "ok"],
+            }
+    except Exception as e:
+        return {
+            "item": None,
+            "logs": [f"  ✗  Erro em '{file.name}': {e}"],
+            "levels": ["err"],
+        }
+
+
+def _get_cache_key(file: Path, threshold: int) -> str:
+    # Gerar um hash baseado no caminho, tamanho, data e threshold
+    stats = file.stat()
+    data = f"{file.absolute()}|{stats.st_size}|{stats.st_mtime}|{threshold}"
+    return hashlib.md5(data.encode()).hexdigest()
+
+
 def process_images(
     folder: Path,
     max_width_px: int,
@@ -96,6 +144,9 @@ def process_images(
     log_fn,
     max_workers: int | None = None,
 ) -> List[dict]:
+    cache_dir = folder / ".ajudante_cache"
+    cache_dir.mkdir(exist_ok=True)
+
     imgs: List[dict] = []
     files = sorted(f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in VALID_EXT)
 
@@ -103,56 +154,59 @@ def process_images(
         log_fn("⚠  Nenhuma imagem encontrada na pasta.", "warn")
         return []
 
+    # Separar arquivos em "Cache" e "Para Processar"
+    to_process = []
+    for f in files:
+        key = _get_cache_key(f, threshold)
+        cache_file = cache_dir / f"{key}.png"
+        meta_file = cache_dir / f"{key}.json"
+        
+        if cache_file.exists() and meta_file.exists():
+            try:
+                import json
+                with open(meta_file, "r", encoding="utf-8") as j:
+                    meta = json.load(j)
+                processed = Image.open(cache_file)
+                processed.load() # Garantir que foi lida
+                imgs.append({
+                    "name": f.name,
+                    "image": processed,
+                    **meta
+                })
+                log_fn(f"  ⚡ {f.name} (Cache)\n", "muted")
+            except Exception:
+                to_process.append(f)
+        else:
+            to_process.append(f)
+
+    if not to_process:
+        log_fn(f"\n  {len(imgs)} imagens carregadas do cache.", "ok")
+        return imgs
+
     cpu_count = max(1, (os.cpu_count() or 1))
     worker_count = min(cpu_count, max_workers or 8)
-    log_fn(f"  Processamento paralelo: {worker_count} workers\n", "info")
+    log_fn(f"  Processamento multiprocesso: {worker_count} workers ({len(to_process)} novas)\n", "info")
 
-    def _process_file(file: Path):
-        try:
-            with Image.open(file) as im:
-                im = ImageOps.exif_transpose(im)
-                im = normalize_to_100dpi(im)
-                im = remove_white(im, threshold=threshold, softness=18)
-                im = crop_transparent(im)
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        from functools import partial
+        worker_fn = partial(_process_single_image, max_width_px=max_width_px, threshold=threshold)
+        results = list(executor.map(worker_fn, to_process))
 
-                if im.mode != "RGBA":
-                    im = im.convert("RGBA")
-
-                if im.width > max_width_px:
-                    im = fit_width(im, max_width_px)
-                    resize_log = f"  ↔  '{file.name}' redimensionada para caber no rolo."
-                else:
-                    resize_log = None
-
-                im = crop_transparent(im)
-                processed = im.copy()
-                image_item = {
-                    "name": file.name,
-                    "image": processed,
-                    "width_px": processed.width,
-                    "height_px": processed.height,
-                    "width_cm": px_to_cm(processed.width),
-                    "height_cm": px_to_cm(processed.height),
-                }
-                return {
-                    "item": image_item,
-                    "logs": [*([resize_log] if resize_log else []), f"  ✓  {file.name}  ({im.width}×{im.height}px)"],
-                    "levels": [*(["warn"] if resize_log else []), "ok"],
-                }
-        except Exception as e:
-            return {
-                "item": None,
-                "logs": [f"  ✗  Erro em '{file.name}': {e}"],
-                "levels": ["err"],
-            }
-
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        results = list(executor.map(_process_file, files))
-
-    for result in results:
+    for f, result in zip(to_process, results):
         item = result["item"]
         if item is not None:
             imgs.append(item)
+            # Salvar no cache
+            try:
+                key = _get_cache_key(f, threshold)
+                item["image"].save(cache_dir / f"{key}.png", format="PNG")
+                import json
+                meta = {k: v for k, v in item.items() if k != "image"}
+                with open(cache_dir / f"{key}.json", "w", encoding="utf-8") as j:
+                    json.dump(meta, j, ensure_ascii=False)
+            except Exception:
+                pass
+
         for message, level in zip(result["logs"], result["levels"]):
             log_fn(f"{message}\n", level)
 
