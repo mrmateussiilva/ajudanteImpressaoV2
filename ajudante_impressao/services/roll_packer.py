@@ -126,7 +126,8 @@ def run_roll_packer(
             margin=margin_px,
             step=effective_step,
             allow_rotate=request.allow_rotate,
-            progress_cb=progress_callback
+            progress_cb=progress_callback,
+            performance_mode=request.performance_mode
         )
     else:
         log_fn("\nCalculando layout compacto...\n", "info")

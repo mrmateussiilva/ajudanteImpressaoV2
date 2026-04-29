@@ -198,12 +198,17 @@ def _quantize(value: int, step: int, minimum: int) -> int:
     return minimum + ((value - minimum + step - 1) // step) * step
 
 
-def _prepare_mask_variants(img: Image.Image, usable_width: int, allow_rotate: bool) -> list[dict]:
+def _prepare_mask_variants(img: Image.Image, usable_width: int, allow_rotate: bool, performance_mode: str = "balanced") -> list[dict]:
     img = trim_empty_borders(img)
     angle_candidates = [0]
     if allow_rotate:
-        # Busca mais agressiva de ângulos: 0, 90, 180, 270 e variações de 15 e 45 graus
-        angle_candidates.extend([90, 180, 270, 15, -15, 30, -30, 45, 135, 225, 315, 60, -60])
+        if performance_mode == "quality":
+            # Busca mais agressiva de ângulos: 0, 90, 180, 270 e variações de 15 e 45 graus
+            angle_candidates.extend([90, 180, 270, 15, -15, 30, -30, 45, 135, 225, 315, 60, -60])
+        elif performance_mode == "balanced":
+            angle_candidates.extend([90, 180, 270, 45, 135, 225, 315])
+        else: # fast
+            angle_candidates.extend([90, 180, 270])
 
     variants: list[dict] = []
     seen: set[tuple[int, int, int]] = set()
@@ -240,40 +245,46 @@ def _ensure_height(occupancy: np.ndarray, min_height: int) -> np.ndarray:
 
 if HAS_NUMBA:
     @numba.njit(nogil=True)
-    def _collides_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int) -> bool:
+    def _collides_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, max_y_used: int) -> bool:
+        if y >= max_y_used:
+            return False
         h, w = mask.shape
         # Short-circuit loop: para no primeiro pixel que colidir
         for i in range(h):
+            if y + i >= max_y_used:
+                break
             for j in range(w):
                 if mask[i, j] > 0 and occupancy[y + i, x + j] > 0:
                     return True
         return False
 
     @numba.njit(nogil=True)
-    def _nudge_gravity_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, margin: int) -> tuple[int, int]:
+    def _nudge_gravity_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, margin: int, max_y_used: int) -> tuple[int, int]:
         cx, cy = x, y
         for _ in range(2):
-            while cy - 1 >= margin and not _collides_jit(occupancy, mask, cx, cy - 1):
+            while cy - 1 >= margin and not _collides_jit(occupancy, mask, cx, cy - 1, max_y_used):
                 cy -= 1
-            while cx - 1 >= margin and not _collides_jit(occupancy, mask, cx - 1, cy):
+            while cx - 1 >= margin and not _collides_jit(occupancy, mask, cx - 1, cy, max_y_used):
                 cx -= 1
         return cx, cy
 
     @numba.njit(nogil=True)
-    def _evaluate_batch_jit(occupancy: np.ndarray, mask: np.ndarray, candidates: np.ndarray, max_y_used: int):
+    def _evaluate_batch_jit(occupancy: np.ndarray, mask: np.ndarray, candidates: np.ndarray, max_y_used: int, max_width: int):
         # Avalia um lote de candidatos em paralelo (aproveita todos os cores)
         num = len(candidates)
         scores = np.full((num, 4), 99999999, dtype=np.int32)
         h_mask = mask.shape[0]
+        w_mask = mask.shape[1]
         
         for i in range(num):
             fx, fy = candidates[i]
-            if not _collides_jit(occupancy, mask, fx, fy):
+            if not _collides_jit(occupancy, mask, fx, fy, max_y_used):
                 bottom = fy + h_mask
+                center_dist = abs(fx + w_mask // 2 - max_width // 2)
                 scores[i, 0] = max(bottom, max_y_used)
                 scores[i, 1] = bottom
                 scores[i, 2] = fy
-                scores[i, 3] = fx
+                scores[i, 3] = -center_dist
         
         best_idx = -1
         best_val = (99999999, 99999999, 99999999, 99999999)
@@ -290,15 +301,20 @@ else:
     _evaluate_batch_jit = None
 
 
-def _collides(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int) -> bool:
+def _collides(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, max_y_used: int) -> bool:
+    if y >= max_y_used:
+        return False
     h, w = mask.shape
     if y < 0 or x < 0 or y + h > occupancy.shape[0] or x + w > occupancy.shape[1]:
         return True
     
     if HAS_NUMBA and _collides_jit is not None:
-        return _collides_jit(occupancy, mask, x, y)
+        return _collides_jit(occupancy, mask, x, y, max_y_used)
         
-    return bool(np.any(occupancy[y:y + h, x:x + w] & mask))
+    check_h = min(h, max_y_used - y)
+    if check_h <= 0:
+        return False
+    return bool(np.any(occupancy[y:y + check_h, x:x + w] & mask[:check_h, :]))
 
 
 def _stamp_reserved(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, spacing: int, margin: int, max_width: int) -> None:
@@ -358,11 +374,11 @@ def _score_candidate(mask: np.ndarray, x: int, y: int, max_width: int, margin: i
     return (max(bottom, max_y_used), bottom, y, -center_dist)
 
 
-def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, progress_cb=None):
+def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, progress_cb=None, performance_mode: str = "balanced"):
     usable_width = max_width - 2 * margin
     prepared = []
     for img in images:
-        variants = _prepare_mask_variants(img, usable_width, allow_rotate)
+        variants = _prepare_mask_variants(img, usable_width, allow_rotate, performance_mode)
         if not variants:
             continue
         primary = variants[0]
@@ -401,11 +417,18 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
             occupancy = _ensure_height(occupancy, search_h)
             
             # --- BUSCA MULTI-ESCALA (COARSE-TO-FINE) ---
-            # Aumentamos a precisão (fator menor) para garantir encaixes perfeitos
-            if w < max_width * 0.15 or h < 150:
-                factor = 1  # Busca direta em escala cheia para peças pequenas
-            else:
-                factor = 2  # No máximo 2x para peças grandes (muito mais preciso que 4x)
+            if performance_mode == "quality":
+                if w < max_width * 0.15 or h < 150:
+                    factor = 1
+                else:
+                    factor = 2
+            elif performance_mode == "balanced":
+                if w < max_width * 0.15 or h < 150:
+                    factor = 2
+                else:
+                    factor = 4
+            else: # fast
+                factor = 4
             
             try:
                 if factor > 1:
@@ -416,6 +439,18 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                     
                     # BUSCA EXAUSTIVA: Agora olhamos o rolo inteiro sem limite de linhas
                     for cy in range(margin // factor, res_c.shape[0]):
+                        base_y = cy * factor
+                        min_y = base_y - factor
+                        min_bottom = min_y + h
+                        
+                        if variant_best is not None:
+                            best_s0 = variant_best["score"][0]
+                            best_s1 = variant_best["score"][1]
+                            if max(min_bottom, max_y_used) > best_s0:
+                                break
+                            if max(min_bottom, max_y_used) == best_s0 and min_bottom > best_s1:
+                                break
+
                         row_c = res_c[cy, (margin // factor) : (max_width - w) // factor + 1]
                         promising_cx_indices = np.where(row_c < 1.0)[0] 
                         
@@ -435,7 +470,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                                         batch.append((fx, fy))
                             
                             if batch and HAS_NUMBA and _evaluate_batch_jit is not None:
-                                idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used)
+                                idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used, max_width)
                                 if idx != -1:
                                     if variant_best is None or score < variant_best["score"]:
                                         bx, by = batch[idx]
@@ -443,7 +478,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                             else:
                                 # Fallback se batch for pequeno ou sem Numba
                                 for fx, fy in batch:
-                                    if not _collides(occupancy, mask, fx, fy):
+                                    if not _collides(occupancy, mask, fx, fy, max_y_used):
                                         score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
                                         if variant_best is None or score < variant_best["score"]:
                                             variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
@@ -456,7 +491,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                     for fy in range(margin, y_limit + 1, step):
                         found_at_fy = False
                         for fx in range(margin, max_width - margin - w + 1, step):
-                            if not _collides(occupancy, mask, fx, fy):
+                            if not _collides(occupancy, mask, fx, fy, max_y_used):
                                 score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
                                 if variant_best is None or score < variant_best["score"]:
                                     variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
@@ -471,7 +506,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                     x = margin
                     found_at_y = False
                     while x + w <= max_width - margin:
-                        if not _collides(occupancy, mask, x, y):
+                        if not _collides(occupancy, mask, x, y, max_y_used):
                             score = _score_candidate(mask, x, y, max_width, margin, max_y_used)
                             variant_best = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
                             found_at_y = True
@@ -493,7 +528,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
             y = max_y_used + spacing
             occupancy = _ensure_height(occupancy, y + img.height + spacing + margin + step)
             while x + img.width <= max_width - margin:
-                if not _collides(occupancy, mask, x, y):
+                if not _collides(occupancy, mask, x, y, max_y_used):
                     break
                 x += step
             best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used)}
@@ -505,12 +540,12 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
 
         # --- REFINAMENTO DE GRAVIDADE (NUDGE) ---
         if HAS_NUMBA and _nudge_gravity_jit is not None:
-            x, y = _nudge_gravity_jit(occupancy, mask, x, y, margin)
+            x, y = _nudge_gravity_jit(occupancy, mask, x, y, margin, max_y_used)
         else:
             for _ in range(2):
-                while y - 1 >= margin and not _collides(occupancy, mask, x, y - 1):
+                while y - 1 >= margin and not _collides(occupancy, mask, x, y - 1, max_y_used):
                     y -= 1
-                while x - 1 >= margin and not _collides(occupancy, mask, x - 1, y):
+                while x - 1 >= margin and not _collides(occupancy, mask, x - 1, y, max_y_used):
                     x -= 1
 
         placed.append((img, x, y))
