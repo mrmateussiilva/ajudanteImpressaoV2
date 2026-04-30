@@ -1,6 +1,5 @@
 use image::DynamicImage;
 use std::cmp::{max, min};
-use rayon::prelude::*;
 use super::image_ops::{trim_empty_borders, Mask};
 use super::packing::PlacedImage;
 
@@ -87,17 +86,14 @@ pub fn pack_images_masked(
             let h = mask.height;
 
             // Ensure occupancy height
-            let required_height = max_y_used + spacing_u + h + step;
+            let required_height = max_y_used + spacing_u + h + step + 64;
             if required_height > occ_height {
-                let growth = required_height + 512;
-                let mut new_occ = vec![false; max_width_u * growth];
-                for y in 0..occ_height {
-                    for x in 0..max_width_u {
-                        new_occ[y * max_width_u + x] = occupancy[y * max_width_u + x];
-                    }
-                }
+                let new_h = required_height + 1024;
+                let mut new_occ = vec![false; max_width_u * new_h];
+                new_occ[..max_width_u * occ_height]
+                    .copy_from_slice(&occupancy[..max_width_u * occ_height]);
                 occupancy = new_occ;
-                occ_height = growth;
+                occ_height = new_h;
             }
 
             let y_limit = max_y_used + spacing_u;
@@ -143,72 +139,60 @@ pub fn pack_images_masked(
             }
         }
 
-        let (mut final_pos, _, var) = best_choice.unwrap_or_else(|| {
+        let (final_pos, _, var) = best_choice.unwrap_or_else(|| {
             // Fallback
             let var = &variants[0];
             ((margin_u, max_y_used + spacing_u), (0,0,0,0), var)
         });
 
-        // Nudge gravity
+        // Nudge gravity — limitado para não ser O(h × w × distancia)
         let mut x = final_pos.0;
         let mut y = final_pos.1;
         let w = var.mask.width;
         let h = var.mask.height;
         
-        for _ in 0..2 {
-            while y > margin_u {
-                let ty = y - 1;
-                let mut collides = false;
-                'c1: for my in 0..h {
-                    for mx in 0..w {
-                        if var.mask.data[my * w + mx] && occupancy[(ty + my) * max_width_u + x + mx] {
-                            collides = true;
-                            break 'c1;
-                        }
+        // Nudge UP: max step * 4 iterações para evitar loop longo
+        let nudge_limit = step * 4;
+        for _ in 0..nudge_limit {
+            if y <= margin_u { break; }
+            let ty = y - 1;
+            let mut col = false;
+            'nu: for my in 0..h {
+                for mx in 0..w {
+                    if var.mask.data[my * w + mx] && occupancy[(ty + my) * max_width_u + x + mx] {
+                        col = true; break 'nu;
                     }
                 }
-                if collides { break; }
-                y -= 1;
             }
-            while x > margin_u {
-                let tx = x - 1;
-                let mut collides = false;
-                'c2: for my in 0..h {
-                    for mx in 0..w {
-                        if var.mask.data[my * w + mx] && occupancy[(y + my) * max_width_u + tx + mx] {
-                            collides = true;
-                            break 'c2;
-                        }
+            if col { break; }
+            y -= 1;
+        }
+        // Nudge LEFT: max step * 4
+        for _ in 0..nudge_limit {
+            if x <= margin_u { break; }
+            let tx = x - 1;
+            let mut col = false;
+            'nl: for my in 0..h {
+                for mx in 0..w {
+                    if var.mask.data[my * w + mx] && occupancy[(y + my) * max_width_u + tx + mx] {
+                        col = true; break 'nl;
                     }
                 }
-                if collides { break; }
-                x -= 1;
             }
+            if col { break; }
+            x -= 1;
         }
 
-        // Stamp
-        for my in 0..h {
-            for mx in 0..w {
-                if var.mask.data[my * w + mx] {
-                    // Apply spacing dilation
-                    let mut dy_start = 0;
-                    if my + y >= spacing_u {
-                        dy_start = (my + y) - spacing_u;
-                    }
-                    let dy_end = min(occ_height - 1, my + y + spacing_u);
-                    
-                    let mut dx_start = margin_u;
-                    if mx + x >= spacing_u + margin_u {
-                        dx_start = (mx + x) - spacing_u;
-                    }
-                    let dx_end = min(max_width_u - margin_u - 1, mx + x + spacing_u);
-
-                    for dy in dy_start..=dy_end {
-                        for dx in dx_start..=dx_end {
-                            occupancy[dy * max_width_u + dx] = true;
-                        }
-                    }
-                }
+        // Stamp: retangular O((w+2s)×(h+2s)) em vez de O(w×h×s²)
+        // Marca o bbox expandido pelo spacing — rápido e correto para retângulos
+        let sy0 = y.saturating_sub(spacing_u).max(margin_u);
+        let sy1 = min(occ_height, y + h + spacing_u);
+        let sx0 = x.saturating_sub(spacing_u).max(margin_u);
+        let sx1 = min(max_width_u - margin_u, x + w + spacing_u);
+        for dy in sy0..sy1 {
+            let row = dy * max_width_u;
+            for dx in sx0..sx1 {
+                occupancy[row + dx] = true;
             }
         }
 
