@@ -43,34 +43,39 @@ impl Contour {
         Self { img: trimmed, row_spans, width: w, height: h, area }
     }
 
-    // Menor y onde esta peça pode ser colocada em px dado o perfil atual
-    fn min_y(&self, profile: &[u32], px: u32, margin: u32) -> u32 {
-        let mut py = margin;
+    // Verifica colisão da imagem em (px, py) com a grid 2D
+    fn collides(&self, px: u32, py: u32, grid: &[bool], grid_w: u32) -> bool {
         for r in 0..self.height {
             let (sl, sr) = self.row_spans[r as usize];
             if sl >= sr { continue; }
-            let x0 = (px + sl) as usize;
-            let x1 = (px + sr) as usize;
-            for x in x0..x1 {
-                // Para que a linha r fique em py+r ≥ profile[x], precisa py ≥ profile[x] - r
-                let needed = profile[x].saturating_sub(r);
-                if needed > py { py = needed; }
+            let row_idx = ((py + r) * grid_w) as usize;
+            let start = row_idx + (px + sl) as usize;
+            let end = row_idx + (px + sr) as usize;
+            // Se algum pixel na grid estiver ocupado, colide.
+            // Slice .iter().any(|&b| b) é muito bem otimizado pelo compilador.
+            if grid[start..end].iter().any(|&b| b) {
+                return true;
             }
         }
-        py
+        false
     }
 
-    // Atualiza o perfil após colocar a peça em (px, py)
-    fn stamp(&self, profile: &mut [u32], px: u32, py: u32, spacing: u32, margin: u32, max_w: u32) {
-        let right_limit = max_w.saturating_sub(margin) as usize;
+    // Marca a imagem na grid, com dilatação pelo `spacing`
+    fn stamp(&self, px: u32, py: u32, grid: &mut [bool], grid_w: u32, grid_h: u32, spacing: u32, margin: u32) {
+        let right_limit = grid_w.saturating_sub(margin);
         for r in 0..self.height {
             let (sl, sr) = self.row_spans[r as usize];
             if sl >= sr { continue; }
-            let x0 = (px + sl).saturating_sub(spacing).max(margin) as usize;
-            let x1 = ((px + sr + spacing) as usize).min(right_limit);
-            let bottom = py + r + 1 + spacing;
-            for x in x0..x1 {
-                if bottom > profile[x] { profile[x] = bottom; }
+            let y_start = (py + r).saturating_sub(spacing).max(margin);
+            let y_end = (py + r + 1 + spacing).min(grid_h);
+            let x_start = (px + sl).saturating_sub(spacing).max(margin);
+            let x_end = (px + sr + spacing).min(right_limit);
+
+            for y in y_start..y_end {
+                let row_idx = (y * grid_w) as usize;
+                let start = row_idx + x_start as usize;
+                let end = row_idx + x_end as usize;
+                grid[start..end].fill(true);
             }
         }
     }
@@ -156,15 +161,15 @@ pub fn pack_images_fast(
     (placed, max_width, fh)
 }
 
-// ── TIGHT / CONTORNO (Skyline com row-spans reais) ────────────────────────────
+// ── TIGHT / CONTORNO (True 2D Nesting - Bottom-Left) ──────────────────────────
 //
 // Fluxo correto:
 //  1. Remove fundo (trim alpha)
 //  2. Extrai contorno real (row_spans: span de pixels opacos por linha)
-//  3. Ordena por área (maior primeiro) → coloca o maior em (margin, margin)
-//  4. Para cada imagem seguinte, varre posições x candidatas e calcula
-//     o menor y possível usando o contorno real (não bounding box)
-//  5. Atualiza o perfil linha a linha com o contorno da peça recém colocada
+//  3. Ordena por área (maior primeiro)
+//  4. Para as outras, varre de baixo para cima (Y) e da esquerda para direita (X)
+//  5. Primeiro lugar onde não colidir, faz nudge para cima e esquerda para precisão.
+//  6. Estampa no grid 2D com spacing expandido.
 //
 pub fn pack_images_tight(
     images: Vec<DynamicImage>, max_width: u32, spacing: u32, margin: u32, step: u32, allow_rotate: bool,
@@ -173,8 +178,8 @@ pub fn pack_images_tight(
     let step = max(1, step);
 
     // Constrói variantes (normal + rotação) e filtra as que cabem
-    let mut all_variants: Vec<Vec<Contour>> = images.iter().map(|img| {
-        let t = trim_empty_borders(img);
+    let mut all_variants: Vec<Vec<Contour>> = images.into_iter().map(|img| {
+        let t = trim_empty_borders(&img);
         let mut vars = vec![Contour::from_image(t.clone())];
         if allow_rotate {
             let r = t.rotate90();
@@ -188,57 +193,96 @@ pub fn pack_images_tight(
     // Ordena grupos: maior área primeiro
     all_variants.sort_by_key(|v| std::cmp::Reverse(v[0].area));
 
-    let mut profile = vec![margin; max_width as usize];
     let mut placed = Vec::new();
     let mut max_y_used = margin;
+    
+    // Grid 2D inicial com altura razoável
+    let mut grid_h = 2000u32;
+    let mut grid = vec![false; (max_width * grid_h) as usize];
 
-    for (group_idx, variants) in all_variants.iter().enumerate() {
+    for variants in all_variants {
         let mut best_px = margin;
-        let mut best_py = max_y_used;
+        let mut best_py = max_y_used + spacing;
         let mut best_vi = 0usize;
-        let mut best_score = (u32::MAX, u32::MAX, u32::MAX);
+        let mut found = false;
 
-        // Primeiro item: coloca direto em (margin, margin)
-        if group_idx == 0 {
-            let c = &variants[0];
-            c.stamp(&mut profile, margin, margin, spacing, margin, max_width);
-            max_y_used = max(max_y_used, margin + c.height);
-            placed.push(PlacedImage { img: c.img.clone(), x: margin, y: margin });
-            continue;
-        }
-
+        // Tenta cada variante, da maior área para menor
         for (vi, contour) in variants.iter().enumerate() {
             let w = contour.width;
-            let x_max = max_width.saturating_sub(margin + w);
-
-            // Candidatos: transições do perfil + varredura com step
-            let mut cands: Vec<u32> = Vec::new();
-            let mut prev = profile[margin as usize];
-            for xi in margin..=x_max {
-                let cur = profile[xi as usize];
-                if cur != prev { cands.push(xi); prev = cur; }
+            let h = contour.height;
+            
+            // Garante que o grid tem altura suficiente para testar
+            let required_h = max_y_used + spacing + h + step + 500;
+            if required_h > grid_h {
+                let old_size = grid.len();
+                grid.resize((max_width * required_h) as usize, false);
+                grid_h = required_h;
             }
-            let mut xi = margin;
-            while xi <= x_max { cands.push(xi); xi += step; }
-            cands.push(x_max);
-            cands.sort_unstable(); cands.dedup();
 
-            for px in cands {
-                if px > x_max { break; }
-                let py = contour.min_y(&profile, px, margin);
-                let bottom = py + contour.height;
-                let score = (max(bottom, max_y_used), bottom, px);
-                if score < best_score {
-                    best_score = score;
-                    best_px = px;
-                    best_py = py;
+            let x_max = max_width.saturating_sub(margin + w);
+            let y_max = max_y_used + spacing;
+
+            let mut cand_py = margin;
+            let mut cand_px = margin;
+            let mut var_found = false;
+
+            'search: for py in (margin..=y_max).step_by(step as usize) {
+                for px in (margin..=x_max).step_by(step as usize) {
+                    if !contour.collides(px, py, &grid, max_width) {
+                        cand_px = px;
+                        cand_py = py;
+                        var_found = true;
+                        break 'search;
+                    }
+                }
+            }
+
+            if var_found {
+                // Encontrou! Agora faz nudge para refinar o encaixe do 'step'
+                // Nudge UP (cima)
+                while cand_py > margin {
+                    if !contour.collides(cand_px, cand_py - 1, &grid, max_width) {
+                        cand_py -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Nudge LEFT (esquerda)
+                while cand_px > margin {
+                    if !contour.collides(cand_px - 1, cand_py, &grid, max_width) {
+                        cand_px -= 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Salva se for o melhor (menor y possível)
+                // Como iteramos y de baixo pra cima, a primeira que acha já é a de menor y!
+                if !found || cand_py < best_py || (cand_py == best_py && cand_px < best_px) {
+                    best_py = cand_py;
+                    best_px = cand_px;
                     best_vi = vi;
+                    found = true;
                 }
             }
         }
 
+        // Se não achou (impossível em teoria já que y_max cresce, mas fallback de segurança)
         let contour = &variants[best_vi];
-        contour.stamp(&mut profile, best_px, best_py, spacing, margin, max_width);
+        if !found {
+            best_px = margin;
+            best_py = max_y_used + spacing;
+        }
+
+        // Estampa a peça escolhida
+        // Garante grid height de novo (caso fallback)
+        let required_h = best_py + contour.height + spacing + 500;
+        if required_h > grid_h {
+            grid.resize((max_width * required_h) as usize, false);
+            grid_h = required_h;
+        }
+
+        contour.stamp(best_px, best_py, &mut grid, max_width, grid_h, spacing, margin);
         max_y_used = max(max_y_used, best_py + contour.height);
         placed.push(PlacedImage { img: contour.img.clone(), x: best_px, y: best_py });
     }
