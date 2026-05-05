@@ -46,6 +46,9 @@ Capacidades atuais:
 - leitura de imagens em lote
 - limpeza de branco e recorte de bordas vazias
 - ajuste de imagens para largura util do rolo
+- classificação automática de tipo de produção (baseada em treinamento visual)
+- rotulagem automática das imagens com identificação do material
+- modo de rotulagem externa (não sobrepõe a arte)
 - multiplos modos de encaixe
 - geracao do canvas final de saida
 
@@ -59,6 +62,14 @@ Capacidades atuais:
 - corte manual baseado na largura da placa
 - processamento em lote
 - numeracao e identificacao das partes geradas
+
+### Inteligência e Classificação
+
+O sistema agora conta com um módulo de classificação automática para otimizar a identificação de materiais:
+
+- **Treinamento Dinâmico**: Basta adicionar pastas com exemplos em `Z:\IMPRESSÃO DE TOTENS\treinamentos`. O sistema aprende novas categorias automaticamente.
+- **Critérios de Classificação**: Utiliza análise de proporção (aspect ratio) e histogramas de cores para identificar o tipo de produção (ex: poliondas, 3mm s/p, 6mm c/p).
+- **Rotulagem de Produção**: Cada imagem recebe uma etiqueta de identificação em uma margem inferior dedicada, facilitando a organização pós-impressão sem afetar a área útil da arte.
 
 ## O que ja foi feito
 
