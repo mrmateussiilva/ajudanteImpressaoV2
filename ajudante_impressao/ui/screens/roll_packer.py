@@ -419,7 +419,26 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             dim_lbl.setStyleSheet("border: none; background: transparent; color: #A6ADC8; font-size: 11px;")
             card_layout.addWidget(dim_lbl)
 
-            card.setFixedSize(220, 260)
+            # Informações de Inteligência (Tipo e Qualidade)
+            info_layout = QHBoxLayout()
+            info_layout.setSpacing(4)
+            
+            cat_val = item.get("category", "N/A")
+            cat_lbl = QLabel(cat_val)
+            cat_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cat_lbl.setStyleSheet("background: #45475A; color: #BAC2DE; border-radius: 4px; padding: 2px 4px; font-size: 10px; font-weight: bold;")
+            info_layout.addWidget(cat_lbl)
+
+            qual_val = item.get("quality", "N/A")
+            qual_color = "#A6E3A1" if qual_val == "boa" else "#F9E2AF" if qual_val == "aceitavel" else "#F38BA8" if qual_val == "ruim" else "#BAC2DE"
+            qual_lbl = QLabel(f"Q: {qual_val.upper()}")
+            qual_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            qual_lbl.setStyleSheet(f"background: #45475A; color: {qual_color}; border-radius: 4px; padding: 2px 4px; font-size: 10px; font-weight: bold;")
+            info_layout.addWidget(qual_lbl)
+            
+            card_layout.addLayout(info_layout)
+
+            card.setFixedSize(220, 290) # Aumentado um pouco para caber as infos
 
             list_item = QListWidgetItem(self.debug_list)
             list_item.setSizeHint(card.size())

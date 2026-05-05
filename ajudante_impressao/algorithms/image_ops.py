@@ -147,19 +147,29 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
 
             # Classificação automática baseada no treinamento
             try:
-                from .classifier import get_classifier
-                classifier = get_classifier()
-                category = classifier.classify(im)
+                from .classifier import get_prod_classifier, get_quality_classifier
+                
+                prod_cls = get_prod_classifier()
+                category = prod_cls.classify(im)
+                
+                quality_cls = get_quality_classifier()
+                quality = quality_cls.classify(im)
+                
+                # Na imagem, escrevemos apenas o tipo (categoria)
                 im = add_label_to_image(im, category)
-                class_log = f"  🏷️  Classificado como: {category}"
+                
+                class_log = f"  🏷️  Tipo: {category} | Qualidade: {quality}"
             except Exception as e:
+                category = "N/A"
+                quality = "N/A"
                 class_log = f"  ⚠  Erro na classificação: {e}"
 
             im = crop_transparent(im)
             processed = im.copy()
             image_item = {
                 "name": file.name,
-                "category": category if 'category' in locals() else "N/A",
+                "category": category,
+                "quality": quality,
                 "image": processed,
                 "width_px": processed.width,
                 "height_px": processed.height,

@@ -68,8 +68,9 @@ Capacidades atuais:
 O sistema agora conta com um módulo de classificação automática para otimizar a identificação de materiais:
 
 - **Treinamento Dinâmico**: Basta adicionar pastas com exemplos em `Z:\IMPRESSÃO DE TOTENS\treinamentos`. O sistema aprende novas categorias automaticamente.
-- **Critérios de Classificação**: Utiliza análise de proporção (aspect ratio) e histogramas de cores para identificar o tipo de produção (ex: poliondas, 3mm s/p, 6mm c/p).
-- **Rotulagem de Produção**: Cada imagem recebe uma etiqueta de identificação em uma margem inferior dedicada, facilitando a organização pós-impressão sem afetar a área útil da arte.
+- **Critérios de Classificação**: Utiliza análise de proporção (aspect ratio), histogramas de cores e **análise de nitidez (Laplacian variance)** para identificar o tipo de produção e o nível de qualidade.
+- **Rotulagem de Produção**: Cada imagem recebe uma etiqueta de identificação do tipo (ex: 3mm sp) em uma margem inferior dedicada.
+- **Indicadores de Qualidade na UI**: O nível de qualidade (Boa, Aceitável, Ruim) é exibido visualmente nos cards de cada imagem dentro do programa, com codificação por cores para rápida conferência.
 
 ## O que ja foi feito
 
