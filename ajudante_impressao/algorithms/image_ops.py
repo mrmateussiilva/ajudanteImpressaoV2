@@ -8,10 +8,48 @@ from pathlib import Path
 from typing import Any, List
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 
 
 VALID_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def add_label_to_image(img: Image.Image, text: str) -> Image.Image:
+    """Adiciona uma margem na parte inferior da imagem e escreve o rótulo nela."""
+    # Tamanho da fonte proporcional à altura da imagem
+    font_size = max(20, int(img.height * 0.025))
+    
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except Exception:
+        try:
+            font = ImageFont.truetype("segoeui.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+
+    # Calcular tamanho do texto
+    temp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    text_bbox = temp_draw.textbbox((0, 0), text, font=font)
+    tw = text_bbox[2] - text_bbox[0]
+    th = text_bbox[3] - text_bbox[1]
+    
+    # Adicionar uma margem inferior (altura do texto + um pouco de respiro)
+    padding = th + 20
+    new_img = Image.new("RGBA", (img.width, img.height + padding), (0, 0, 0, 0))
+    new_img.paste(img, (0, 0))
+    
+    draw = ImageDraw.Draw(new_img)
+    
+    # Centralizar o texto na nova margem ou colocar no canto
+    # Vamos colocar no canto inferior direito da nova área
+    x = new_img.width - tw - 10
+    y = img.height + 5
+    
+    # Fundo do texto para garantir leitura
+    draw.rectangle([x - 5, y - 2, x + tw + 5, y + th + 5], fill=(255, 255, 255, 220))
+    draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
+    
+    return new_img
 
 
 def cm_to_px(cm: float, dpi: int = 100) -> int:
@@ -107,10 +145,21 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
             else:
                 resize_log = None
 
+            # Classificação automática baseada no treinamento
+            try:
+                from .classifier import get_classifier
+                classifier = get_classifier()
+                category = classifier.classify(im)
+                im = add_label_to_image(im, category)
+                class_log = f"  🏷️  Classificado como: {category}"
+            except Exception as e:
+                class_log = f"  ⚠  Erro na classificação: {e}"
+
             im = crop_transparent(im)
             processed = im.copy()
             image_item = {
                 "name": file.name,
+                "category": category if 'category' in locals() else "N/A",
                 "image": processed,
                 "width_px": processed.width,
                 "height_px": processed.height,
@@ -119,8 +168,8 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
             }
             return {
                 "item": image_item,
-                "logs": [*([resize_log] if resize_log else []), f"  ✓  {file.name}  ({im.width}×{im.height}px)"],
-                "levels": [*(["warn"] if resize_log else []), "ok"],
+                "logs": [*([resize_log] if resize_log else []), class_log, f"  ✓  {file.name}  ({im.width}×{im.height}px)"],
+                "levels": [*(["warn"] if resize_log else []), "info", "ok"],
             }
     except Exception as e:
         return {
