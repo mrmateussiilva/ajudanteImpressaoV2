@@ -65,10 +65,16 @@ Capacidades atuais:
 
 ### Inteligência e Classificação
 
-O sistema agora conta com um módulo de classificação automática para otimizar a identificação de materiais:
+O sistema conta com um módulo de classificação automática para otimizar a identificação de materiais e avaliar a qualidade visual das imagens. O diferencial é que **não são utilizados modelos pesados de *Deep Learning***; a abordagem é baseada em extração de características visuais via **OpenCV** e inferência pelo algoritmo **KNN (K-Nearest Neighbors)**.
 
-- **Treinamento Dinâmico**: Basta adicionar pastas com exemplos em `Z:\IMPRESSÃO DE TOTENS\treinamentos`. O sistema aprende novas categorias automaticamente.
-- **Critérios de Classificação**: Utiliza análise de proporção (aspect ratio), histogramas de cores e **análise de nitidez (Laplacian variance)** para identificar o tipo de produção e o nível de qualidade.
+- **Treinamento Dinâmico em Memória**: O sistema não gera arquivos de pesos. Ele aprende carregando as imagens "referência" em tempo de execução. Basta adicionar pastas com exemplos nos diretórios de base:
+  - `Z:\IMPRESSÃO DE TOTENS\treinamentos`: Treina o classificador de produção (ex: 3mm sp, 6mm cp).
+  - `Z:\IMPRESSÃO DE TOTENS\qualidade`: Treina o classificador de qualidade (ex: boa, aceitável, ruim).
+- **Extração de Características**:
+  - *Proporção (Aspect Ratio)*: Relação largura/altura, muito importante para o classificador de produção.
+  - *Nitidez (Sharpness)*: Calculada via variância Laplaciana (`cv2.Laplacian`), vital para o classificador de qualidade detectar imagens borradas.
+  - *Histograma de Cores*: Uma assinatura visual baseada em distribuição de cores.
+- **Processo de Classificação (Inferência)**: A nova imagem é comparada com a base em memória. O sistema aplica pesos diferentes (ex: prioriza nitidez para qualidade, prioriza proporção para produção). O algoritmo KNN pega os 3 exemplos matematicamente mais próximos e faz uma votação para eleger a categoria vencedora.
 - **Rotulagem de Produção**: Cada imagem recebe uma etiqueta de identificação do tipo (ex: 3mm sp) em uma margem inferior dedicada.
 - **Indicadores de Qualidade na UI**: O nível de qualidade (Boa, Aceitável, Ruim) é exibido visualmente nos cards de cada imagem dentro do programa, com codificação por cores para rápida conferência.
 
