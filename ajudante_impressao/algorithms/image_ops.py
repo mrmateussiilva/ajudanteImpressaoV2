@@ -17,7 +17,7 @@ VALID_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 def add_label_to_image(img: Image.Image, text: str) -> Image.Image:
     """Adiciona uma margem na parte inferior da imagem e escreve o rótulo nela."""
     # Tamanho da fonte proporcional à altura da imagem
-    font_size = max(20, int(img.height * 0.025))
+    font_size = max(20, int(img.height * 0.03))
     
     try:
         font = ImageFont.truetype("arial.ttf", font_size)
@@ -33,20 +33,23 @@ def add_label_to_image(img: Image.Image, text: str) -> Image.Image:
     tw = text_bbox[2] - text_bbox[0]
     th = text_bbox[3] - text_bbox[1]
     
-    # Adicionar uma margem inferior (altura do texto + um pouco de respiro)
-    padding = th + 20
-    new_img = Image.new("RGBA", (img.width, img.height + padding), (0, 0, 0, 0))
-    new_img.paste(img, (0, 0))
+    # Criar uma margem inferior sólida branca ou transparente
+    # Vamos usar transparente, mas o fundo do texto será sólido
+    padding_h = th + 30
+    
+    # Usar expand para adicionar a borda inferior
+    new_img = ImageOps.expand(img, border=(0, 0, 0, padding_h), fill=(0, 0, 0, 0))
     
     draw = ImageDraw.Draw(new_img)
     
-    # Centralizar o texto na nova margem ou colocar no canto
-    # Vamos colocar no canto inferior direito da nova área
-    x = new_img.width - tw - 10
-    y = img.height + 5
+    # Posição: centralizado horizontalmente na nova margem ou no canto?
+    # O usuário prefere no canto para organização
+    x = new_img.width - tw - 15
+    y = img.height + 10 # 10 pixels de distância da arte original
     
-    # Fundo do texto para garantir leitura
-    draw.rectangle([x - 5, y - 2, x + tw + 5, y + th + 5], fill=(255, 255, 255, 220))
+    # Fundo do texto SÓLIDO para garantir que não seja ignorado no crop (se houver um)
+    # E para ser 100% legível fora da arte
+    draw.rectangle([x - 8, y - 5, x + tw + 8, y + th + 8], fill=(255, 255, 255, 255))
     draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
     
     return new_img
@@ -145,7 +148,9 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
             else:
                 resize_log = None
 
-            # Classificação automática baseada no treinamento
+            im = crop_transparent(im)
+            
+            # Classificação automática baseada no treinamento (DEPOIS do crop final)
             try:
                 from .classifier import get_prod_classifier, get_quality_classifier
                 
@@ -164,7 +169,6 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
                 quality = "N/A"
                 class_log = f"  ⚠  Erro na classificação: {e}"
 
-            im = crop_transparent(im)
             processed = im.copy()
             image_item = {
                 "name": file.name,
