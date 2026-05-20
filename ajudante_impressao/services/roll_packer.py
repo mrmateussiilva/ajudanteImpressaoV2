@@ -8,7 +8,7 @@ from PIL import Image
 
 Image.MAX_IMAGE_PIXELS = None  # Permitir processar imagens muito grandes
 
-from ..algorithms.image_ops import cm_to_px, process_images, rgba_to_white_background
+from ..algorithms.image_ops import add_label_to_image, cm_to_px, process_images, rgba_to_white_background
 from ..algorithms.packing import build_canvas, pack_images_fast, pack_images_gallery, pack_images_masked, pack_images_tight
 
 
@@ -37,6 +37,7 @@ class RollerPackRequest:
     row_height_cm: float
     output_name: str
     performance_mode: str
+    label_position: str
 
 
 @dataclass(slots=True)
@@ -56,6 +57,7 @@ def run_roll_packer(
     log_fn: LogCallback,
     status_fn: StatusCallback,
     debug_fn: DebugCallback | None = None,
+    image_items: list[dict] | None = None,
 ) -> RollerPackResult | None:
     profile = PERFORMANCE_PROFILES.get(request.performance_mode, PERFORMANCE_PROFILES["balanced"])
     roll_px = cm_to_px(request.largura_cm)
@@ -82,15 +84,26 @@ def run_roll_packer(
     log_fn(f"  Modo: {request.packing_mode}\n", "info")
     log_fn(f"{'─' * 58}\n\n", "muted")
 
-    status_fn("Processando imagens...")
-    image_items = process_images(request.folder, usable_width, request.threshold, log_fn, max_workers=profile["max_workers"])
-    if not image_items:
-        return None
+    if image_items is None:
+        status_fn("Processando imagens...")
+        image_items = process_images(request.folder, usable_width, request.threshold, log_fn, max_workers=profile["max_workers"])
+        if not image_items:
+            return None
+    else:
+        log_fn(f"Usando {len(image_items)} imagens pré-carregadas da interface.\n", "info")
 
     if debug_fn is not None:
         debug_fn(image_items, profile["debug_limit"])
 
-    images = [item["image"] for item in image_items]
+    # Aplicar rótulos dinâmicos de categoria nas imagens limpas antes de passar para o packer
+    images = []
+    for item in image_items:
+        clean_img = item["image"]
+        category = item.get("category", "N/A")
+        # Desenha a etiqueta da categoria
+        labeled_img = add_label_to_image(clean_img, category, position=request.label_position)
+        images.append(labeled_img)
+
     status_fn("Calculando layout...")
 
     if request.packing_mode == "gallery":

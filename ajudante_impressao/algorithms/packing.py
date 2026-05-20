@@ -282,8 +282,8 @@ if HAS_NUMBA:
                 bottom = fy + h_mask
                 center_dist = abs(fx + w_mask // 2 - max_width // 2)
                 scores[i, 0] = max(bottom, max_y_used)
-                scores[i, 1] = bottom
-                scores[i, 2] = fy
+                scores[i, 1] = fy
+                scores[i, 2] = bottom
                 scores[i, 3] = -center_dist
         
         best_idx = -1
@@ -367,11 +367,11 @@ def _stamp_reserved(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, spa
 def _score_candidate(mask: np.ndarray, x: int, y: int, max_width: int, margin: int, max_y_used: int) -> tuple[int, int, int, int]:
     bottom = y + mask.shape[0]
     # Prioridade 1: Minimizar o aumento do rolo
-    # Prioridade 2: Minimizar a base da peça (quanto mais alto melhor)
-    # Prioridade 3: Minimizar o topo da peça (quanto mais alto melhor)
+    # Prioridade 2: Minimizar o topo da peça (afundar o máximo possível nos buracos)
+    # Prioridade 3: Minimizar a base da peça
     # Prioridade 4: Favorecer encostar nas bordas (x pequeno ou x grande)
     center_dist = abs(x + mask.shape[1] // 2 - max_width // 2)
-    return (max(bottom, max_y_used), bottom, y, -center_dist)
+    return (max(bottom, max_y_used), y, bottom, -center_dist)
 
 
 def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, progress_cb=None, performance_mode: str = "balanced"):
@@ -400,149 +400,179 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
     max_y_used = margin
     
     total_count = len(prepared)
+    remaining = prepared.copy()
+    
+    if performance_mode == "quality":
+        lookahead = 5
+    elif performance_mode == "balanced":
+        lookahead = 3
+    else:
+        lookahead = 1
 
-    for i, piece in enumerate(prepared):
+    processed_count = 0
+
+    while remaining:
         if progress_cb:
-            progress_cb(i, total_count)
-        best_choice = None
-        max_occ_y = max_y_used + spacing
-
-        for variant in piece["variants"]:
-            img = variant["image"]
-            mask = variant["mask"]
-            w, h = img.size
-            variant_best = None
+            progress_cb(processed_count, total_count)
             
-            # Garantir que a área de busca seja suficiente
-            search_h = max_y_used + spacing + h + step
-            occupancy = _ensure_height(occupancy, search_h)
-            
-            # --- BUSCA MULTI-ESCALA (COARSE-TO-FINE) ---
-            if performance_mode == "quality":
-                if w < max_width * 0.15 or h < 150:
-                    factor = 1
-                else:
-                    factor = 2
-            elif performance_mode == "balanced":
-                if w < max_width * 0.15 or h < 150:
-                    factor = 2
-                else:
-                    factor = 4
-            else: # fast
-                factor = 4
-            
-            try:
-                if factor > 1:
-                    mask_c = cv2.resize(mask, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
-                    occ_slice = occupancy[:search_h, :]
-                    occ_c = cv2.resize(occ_slice, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
-                    res_c = cv2.matchTemplate(occ_c, mask_c, cv2.TM_CCORR)
-                    
-                    # BUSCA EXAUSTIVA: Agora olhamos o rolo inteiro sem limite de linhas
-                    for cy in range(margin // factor, res_c.shape[0]):
-                        base_y = cy * factor
-                        min_y = base_y - factor
-                        min_bottom = min_y + h
-                        
-                        if variant_best is not None:
-                            best_s0 = variant_best["score"][0]
-                            best_s1 = variant_best["score"][1]
-                            if max(min_bottom, max_y_used) > best_s0:
-                                break
-                            if max(min_bottom, max_y_used) == best_s0 and min_bottom > best_s1:
-                                break
+        best_overall_choice = None
+        best_piece_index = -1
+        
+        current_lookahead = min(len(remaining), lookahead)
+        
+        for i in range(current_lookahead):
+            piece = remaining[i]
+            best_choice = None
+            max_occ_y = max_y_used + spacing
 
-                        row_c = res_c[cy, (margin // factor) : (max_width - w) // factor + 1]
-                        promising_cx_indices = np.where(row_c < 1.0)[0] 
-                        
-                        if promising_cx_indices.size > 0:
-                            found_any_in_coarse = True
-                            
-                            # Coletar candidatos para avaliação em lote (paralelo)
-                            batch = []
-                            # Reduzimos o step para um encaixe muito mais fino
-                            fine_step = max(2, step // 2)
-                            
-                            for pcx in promising_cx_indices:
-                                base_x = (margin // factor + pcx) * factor
-                                base_y = cy * factor
-                                for fy in range(max(margin, base_y - factor), base_y + factor + 1, fine_step):
-                                    for fx in range(max(margin, base_x - factor), min(max_width - margin - w, base_x + factor + 1), fine_step):
-                                        batch.append((fx, fy))
-                            
-                            if batch and HAS_NUMBA and _evaluate_batch_jit is not None:
-                                idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used, max_occ_y, max_width)
-                                if idx != -1:
-                                    if variant_best is None or score < variant_best["score"]:
-                                        bx, by = batch[idx]
-                                        variant_best = {"image": img, "mask": mask, "x": bx, "y": by, "score": score}
-                            else:
-                                # Fallback se batch for pequeno ou sem Numba
-                                for fx, fy in batch:
-                                    if not _collides(occupancy, mask, fx, fy, max_occ_y):
-                                        score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
-                                        if variant_best is None or score < variant_best["score"]:
-                                            variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
-                    
-                    if not found_any_in_coarse:
-                        raise Exception("No coarse match")
-                else:
-                    # Busca direta para peças pequenas (factor=1)
-                    y_limit = max_y_used + spacing
-                    for fy in range(margin, y_limit + 1, step):
-                        found_at_fy = False
-                        for fx in range(margin, max_width - margin - w + 1, step):
-                            if not _collides(occupancy, mask, fx, fy, max_occ_y):
-                                score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
-                                if variant_best is None or score < variant_best["score"]:
-                                    variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
-                                    found_at_fy = True
-                        if found_at_fy and variant_best["score"][1] < max_y_used:
-                            break # Encontramos uma vaga num "buraco" acima do final do rolo
-
-            except Exception:
-                # Fallback para busca manual total se a miniatura falhar
-                y = margin
-                while y <= max_y_used + spacing:
-                    x = margin
-                    found_at_y = False
-                    while x + w <= max_width - margin:
-                        if not _collides(occupancy, mask, x, y, max_occ_y):
-                            score = _score_candidate(mask, x, y, max_width, margin, max_y_used)
-                            variant_best = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
-                            found_at_y = True
-                            break
-                        x += step
-                    if found_at_y:
-                        break
-                    y += step
+            for variant in piece["variants"]:
+                img = variant["image"]
+                mask = variant["mask"]
+                w, h = img.size
+                variant_best = None
                 
-            if variant_best is not None:
-                if best_choice is None or variant_best["score"] < best_choice["score"]:
-                    best_choice = variant_best
+                # Garantir que a área de busca seja suficiente
+                search_h = max_y_used + spacing + h + step
+                occupancy = _ensure_height(occupancy, search_h)
+                
+                # --- BUSCA MULTI-ESCALA (COARSE-TO-FINE) ---
+                if performance_mode == "quality":
+                    if w < max_width * 0.15 or h < 150:
+                        factor = 1
+                    else:
+                        factor = 2
+                elif performance_mode == "balanced":
+                    if w < max_width * 0.15 or h < 150:
+                        factor = 2
+                    else:
+                        factor = 4
+                else: # fast
+                    factor = 4
+                
+                try:
+                    if factor > 1:
+                        mask_c = cv2.resize(mask, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                        occ_slice = occupancy[:search_h, :]
+                        occ_c = cv2.resize(occ_slice, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                        res_c = cv2.matchTemplate(occ_c, mask_c, cv2.TM_CCORR)
+                        
+                        coarse_thresh = 1.0 if factor <= 2 else 2.0
+                        
+                        # BUSCA EXAUSTIVA: Agora olhamos o rolo inteiro sem limite de linhas
+                        for cy in range(margin // factor, res_c.shape[0]):
+                            base_y = cy * factor
+                            min_y = base_y - factor
+                            min_bottom = min_y + h
+                            
+                            if variant_best is not None:
+                                best_s0 = variant_best["score"][0]
+                                best_s1 = variant_best["score"][1] # Agora é o 'y' no score
+                                if max(min_bottom, max_y_used) > best_s0:
+                                    break
+                                if max(min_bottom, max_y_used) == best_s0 and min_y > best_s1:
+                                    break
 
-        if best_choice is None:
-            fallback = piece["variants"][0]
-            img = fallback["image"]
-            mask = fallback["mask"]
-            x = margin
-            y = max_y_used + spacing
-            occupancy = _ensure_height(occupancy, y + img.height + spacing + margin + step)
-            while x + img.width <= max_width - margin:
-                if not _collides(occupancy, mask, x, y, max_occ_y):
-                    break
-                x += step
-            best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used)}
+                            row_c = res_c[cy, (margin // factor) : (max_width - w) // factor + 1]
+                            promising_cx_indices = np.where(row_c <= coarse_thresh)[0] 
+                            
+                            if promising_cx_indices.size > 0:
+                                found_any_in_coarse = True
+                                
+                                # Coletar candidatos para avaliação em lote (paralelo)
+                                batch = []
+                                # Reduzimos o step para um encaixe muito mais fino
+                                fine_step = max(2, step // 2)
+                                
+                                for pcx in promising_cx_indices:
+                                    base_x = (margin // factor + pcx) * factor
+                                    base_y = cy * factor
+                                    for fy in range(max(margin, base_y - factor), base_y + factor + 1, fine_step):
+                                        for fx in range(max(margin, base_x - factor), min(max_width - margin - w, base_x + factor + 1), fine_step):
+                                            batch.append((fx, fy))
+                                
+                                if batch and HAS_NUMBA and _evaluate_batch_jit is not None:
+                                    idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used, max_occ_y, max_width)
+                                    if idx != -1:
+                                        if variant_best is None or score < variant_best["score"]:
+                                            bx, by = batch[idx]
+                                            variant_best = {"image": img, "mask": mask, "x": bx, "y": by, "score": score}
+                                else:
+                                    # Fallback se batch for pequeno ou sem Numba
+                                    for fx, fy in batch:
+                                        if not _collides(occupancy, mask, fx, fy, max_occ_y):
+                                            score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                            if variant_best is None or score < variant_best["score"]:
+                                                variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
+                        
+                        if not found_any_in_coarse:
+                            raise Exception("No coarse match")
+                    else:
+                        # Busca direta para peças pequenas (factor=1)
+                        y_limit = max_y_used + spacing
+                        for fy in range(margin, y_limit + 1, step):
+                            found_at_fy = False
+                            for fx in range(margin, max_width - margin - w + 1, step):
+                                if not _collides(occupancy, mask, fx, fy, max_occ_y):
+                                    score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                    if variant_best is None or score < variant_best["score"]:
+                                        variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
+                                        found_at_fy = True
+                            if found_at_fy and variant_best["score"][1] < max_y_used:
+                                break # Encontramos uma vaga num "buraco" acima do final do rolo
 
-        img = best_choice["image"]
-        mask = best_choice["mask"]
-        x = best_choice["x"]
-        y = best_choice["y"]
+                except Exception:
+                    # Fallback para busca manual total se a miniatura falhar
+                    y = margin
+                    while y <= max_y_used + spacing:
+                        x = margin
+                        found_at_y = False
+                        while x + w <= max_width - margin:
+                            if not _collides(occupancy, mask, x, y, max_occ_y):
+                                score = _score_candidate(mask, x, y, max_width, margin, max_y_used)
+                                variant_best = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
+                                found_at_y = True
+                                break
+                            x += step
+                        if found_at_y:
+                            break
+                        y += step
+                    
+                if variant_best is not None:
+                    if best_choice is None or variant_best["score"] < best_choice["score"]:
+                        best_choice = variant_best
+
+            if best_choice is None:
+                fallback = piece["variants"][0]
+                img = fallback["image"]
+                mask = fallback["mask"]
+                x = margin
+                y = max_y_used + spacing
+                occupancy = _ensure_height(occupancy, y + img.height + spacing + margin + step)
+                while x + img.width <= max_width - margin:
+                    if not _collides(occupancy, mask, x, y, max_occ_y):
+                        break
+                    x += step
+                best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used)}
+
+            if best_overall_choice is None or best_choice["score"] < best_overall_choice["score"]:
+                best_overall_choice = best_choice
+                best_piece_index = i
+
+        # Ao final do lookahead, usamos a melhor peça encontrada
+        piece_to_place = remaining.pop(best_piece_index)
+        processed_count += 1
+
+        img = best_overall_choice["image"]
+        mask = best_overall_choice["mask"]
+        x = best_overall_choice["x"]
+        y = best_overall_choice["y"]
 
         # --- REFINAMENTO DE GRAVIDADE (NUDGE) ---
         if HAS_NUMBA and _nudge_gravity_jit is not None:
+            max_occ_y = max_y_used + spacing
             x, y = _nudge_gravity_jit(occupancy, mask, x, y, margin, max_occ_y)
         else:
+            max_occ_y = max_y_used + spacing
             for _ in range(2):
                 while y - 1 >= margin and not _collides(occupancy, mask, x, y - 1, max_occ_y):
                     y -= 1

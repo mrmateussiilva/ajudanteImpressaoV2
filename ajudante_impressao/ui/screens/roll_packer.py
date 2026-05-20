@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont, QIcon, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...services.roll_packer import RollerPackRequest, RollerPackResult, run_roll_packer
+from ...services.roll_packer import PERFORMANCE_PROFILES, RollerPackRequest, RollerPackResult, run_roll_packer
 from ..common import ScreenScaffold
 
 
@@ -58,6 +59,34 @@ class DebugPayload:
     debug_limit: int
 
 
+class ImageLoaderWorker(QObject):
+    log = Signal(str, str)
+    status = Signal(str)
+    finished = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, folder: Path, usable_width: int, threshold: int, max_workers: int):
+        super().__init__()
+        self._folder = folder
+        self._usable_width = usable_width
+        self._threshold = threshold
+        self._max_workers = max_workers
+
+    def run(self) -> None:
+        try:
+            from ...algorithms.image_ops import process_images
+            items = process_images(
+                folder=self._folder,
+                max_width_px=self._usable_width,
+                threshold=self._threshold,
+                log_fn=lambda text, level="info": self.log.emit(text, level),
+                max_workers=self._max_workers,
+            )
+            self.finished.emit(items)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class RollPackWorker(QObject):
     log = Signal(str, str)
     status = Signal(str)
@@ -65,9 +94,10 @@ class RollPackWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, request: RollerPackRequest):
+    def __init__(self, request: RollerPackRequest, image_items: list[dict] | None = None):
         super().__init__()
         self._request = request
+        self._image_items = image_items
 
     def run(self) -> None:
         try:
@@ -76,6 +106,7 @@ class RollPackWorker(QObject):
                 log_fn=lambda text, level="info": self.log.emit(text, level),
                 status_fn=lambda text: self.status.emit(text),
                 debug_fn=lambda items, limit: self.debug.emit(DebugPayload(items, limit)),
+                image_items=self._image_items,
             )
             self.finished.emit(result)
         except Exception as exc:
@@ -87,9 +118,10 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         super().__init__()
         self._folder: Path | None = None
         self._worker_thread: QThread | None = None
-        self._worker: RollPackWorker | None = None
+        self._worker: QObject | None = None
         self._preview_pixmap: QPixmap | None = None
         self._debug_pixmaps: list[QPixmap] = []
+        self._loaded_image_items: list[dict] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -116,6 +148,11 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         pick_button = QPushButton("Selecionar Pasta")
         pick_button.clicked.connect(self._choose_folder)
         layout.addWidget(pick_button)
+
+        self.load_button = QPushButton("Carregar Imagens")
+        self.load_button.clicked.connect(self._load_images)
+        self.load_button.setEnabled(False)
+        layout.addWidget(self.load_button)
 
         layout.addWidget(self.section_label("CONFIGURACOES"))
         config_box = QGroupBox()
@@ -164,6 +201,30 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
 
         self.rotate_checkbox = QCheckBox("Permitir rotacao automatica")
         config_layout.addWidget(self.rotate_checkbox)
+
+        config_layout.addWidget(self.field_label("Posição do rótulo"))
+        self.label_pos_combo = QComboBox()
+        self.label_pos_combo.addItems([
+            "Externo - Inferior Direita",
+            "Externo - Inferior Esquerda",
+            "Externo - Inferior Centro",
+            "Sobreposto - Direita Inferior",
+            "Sobreposto - Esquerda Inferior",
+            "Sobreposto - Direita Superior",
+            "Sobreposto - Esquerda Superior"
+        ])
+        self.label_pos_map = {
+            "Externo - Inferior Direita": "external_bottom_right",
+            "Externo - Inferior Esquerda": "external_bottom_left",
+            "Externo - Inferior Centro": "external_bottom_center",
+            "Sobreposto - Direita Inferior": "overlay_bottom_right",
+            "Sobreposto - Esquerda Inferior": "overlay_bottom_left",
+            "Sobreposto - Direita Superior": "overlay_top_right",
+            "Sobreposto - Esquerda Superior": "overlay_top_left"
+        }
+        self.label_pos_combo.setCurrentText("Externo - Inferior Direita")
+        config_layout.addWidget(self.label_pos_combo)
+
         layout.addWidget(config_box)
 
         layout.addWidget(self.section_label("ARQUIVO DE SAIDA"))
@@ -191,7 +252,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_log_tab(), "Log")
         self.tabs.addTab(self._build_preview_tab(), "Preview")
-        self.tabs.addTab(self._build_debug_tab(), "Debug")
+        self.tabs.addTab(self._build_debug_tab(), "Fila de Produção")
         layout.addWidget(self.tabs, 1)
         return frame
 
@@ -257,6 +318,71 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._folder = Path(selected)
         self.folder_label.setText(f".../{self._folder.name}")
         self._append_log(f"📂  Pasta selecionada:\n    {selected}\n", "info")
+        self.load_button.setEnabled(True)
+        self._loaded_image_items = []
+
+    def _load_images(self) -> None:
+        if self._worker_thread is not None:
+            return
+        if self._folder is None:
+            QMessageBox.critical(self, "Erro", "Selecione uma pasta de imagens primeiro.")
+            return
+
+        try:
+            largura = float(self.width_input.text())
+            margem = float(self.margin_input.text())
+            threshold = int(self.threshold_input.text())
+        except ValueError:
+            QMessageBox.critical(self, "Erro", "Verifique os valores de largura, margem e threshold.")
+            return
+
+        from ...algorithms.image_ops import cm_to_px
+        roll_px = cm_to_px(largura)
+        margin_px = cm_to_px(margem)
+        usable_width = max(1, roll_px - 2 * margin_px)
+
+        profile = PERFORMANCE_PROFILES.get(
+            self._selected_value(self.performance_radios), PERFORMANCE_PROFILES["balanced"]
+        )
+
+        self.log_output.clear()
+        self.debug_list.clear()
+        self.preview_label.setText("Carregando imagens...")
+        self.preview_label.setPixmap(QPixmap())
+        self._set_running(True)
+
+        self._worker_thread = QThread(self)
+        self._worker = ImageLoaderWorker(
+            folder=self._folder,
+            usable_width=usable_width,
+            threshold=threshold,
+            max_workers=profile["max_workers"],
+        )
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.log.connect(self._append_log)
+        self._worker.status.connect(self._set_status)
+        self._worker.finished.connect(self._handle_loading_finished)
+        self._worker.failed.connect(self._handle_failed)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker.failed.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._cleanup_worker)
+        self._worker_thread.start()
+
+    def _handle_loading_finished(self, image_items: list[dict] | None) -> None:
+        self._set_running(False)
+        if not image_items:
+            self._set_status("Nenhuma imagem valida encontrada.")
+            return
+
+        self._loaded_image_items = image_items
+        self._set_status(f"{len(image_items)} imagens carregadas.")
+        
+        profile = PERFORMANCE_PROFILES.get(
+            self._selected_value(self.performance_radios), PERFORMANCE_PROFILES["balanced"]
+        )
+        self._show_debug_images(DebugPayload(image_items, profile["debug_limit"]))
+        self.tabs.setCurrentIndex(2)
 
     def _run(self) -> None:
         if self._worker_thread is not None:
@@ -282,6 +408,9 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         elif Path(output_name).suffix.lower() not in {".jpg", ".jpeg"}:
             output_name = f"{Path(output_name).stem}.jpg"
 
+        label_pos_text = self.label_pos_combo.currentText()
+        label_pos_value = self.label_pos_map.get(label_pos_text, "external_bottom_right")
+
         request = RollerPackRequest(
             folder=self._folder,
             largura_cm=largura,
@@ -294,16 +423,16 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             row_height_cm=row_height_cm,
             output_name=output_name,
             performance_mode=self._selected_value(self.performance_radios),
+            label_position=label_pos_value,
         )
 
         self.log_output.clear()
-        self.debug_list.clear()
         self.preview_label.setText("Processando...")
         self.preview_label.setPixmap(QPixmap())
         self._set_running(True)
 
         self._worker_thread = QThread(self)
-        self._worker = RollPackWorker(request)
+        self._worker = RollPackWorker(request, image_items=self._loaded_image_items or None)
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.log.connect(self._append_log)
@@ -423,11 +552,59 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             info_layout = QHBoxLayout()
             info_layout.setSpacing(4)
             
-            cat_val = item.get("category", "N/A")
-            cat_lbl = QLabel(cat_val)
-            cat_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cat_lbl.setStyleSheet("background: #45475A; color: #BAC2DE; border-radius: 4px; padding: 2px 4px; font-size: 10px; font-weight: bold;")
-            info_layout.addWidget(cat_lbl)
+            # Dropdown interativo para Tipo de Produção (Categoria)
+            from ...algorithms.classifier import get_prod_classifier
+            
+            try:
+                available_categories = list(get_prod_classifier().category_names)
+            except Exception:
+                available_categories = []
+                
+            default_cats = ["3mm sp", "6mm cp", "poliondas"]
+            for default_cat in default_cats:
+                if default_cat not in available_categories:
+                    available_categories.append(default_cat)
+                    
+            if "N/A" not in available_categories:
+                available_categories.append("N/A")
+                
+            current_cat = item.get("category", "N/A")
+            if current_cat not in available_categories:
+                available_categories.append(current_cat)
+                
+            available_categories.sort(key=lambda x: (x == "N/A", x.lower()))
+            
+            cat_combo = QComboBox()
+            cat_combo.addItems(available_categories)
+            cat_combo.setCurrentText(current_cat)
+            cat_combo.setStyleSheet(
+                "QComboBox {"
+                "    background: #45475A;"
+                "    color: #BAC2DE;"
+                "    border-radius: 4px;"
+                "    padding: 2px 6px;"
+                "    font-size: 10px;"
+                "    font-weight: bold;"
+                "    border: 1px solid rgba(255, 255, 255, 0.1);"
+                "}"
+                "QComboBox::drop-down {"
+                "    border: none;"
+                "}"
+                "QComboBox QAbstractItemView {"
+                "    background-color: #313244;"
+                "    color: #CDD6F4;"
+                "    selection-background-color: #585b70;"
+                "    border: 1px solid rgba(255, 255, 255, 0.15);"
+                "}"
+            )
+            
+            def make_change_handler(target_item=item):
+                def on_change(text):
+                    target_item["category"] = text
+                return on_change
+                
+            cat_combo.currentTextChanged.connect(make_change_handler(item))
+            info_layout.addWidget(cat_combo, 1)
 
             qual_val = item.get("quality", "N/A")
             qual_color = "#A6E3A1" if qual_val == "boa" else "#F9E2AF" if qual_val == "aceitavel" else "#F38BA8" if qual_val == "ruim" else "#BAC2DE"

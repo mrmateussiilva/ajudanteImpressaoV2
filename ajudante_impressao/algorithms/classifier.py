@@ -69,8 +69,8 @@ class ImageClassifier:
         print(f"[{self.name}] Trained on {total_files} images across {len(self.category_names)} categories.")
         return True
 
-    def classify(self, image: Image.Image) -> str:
-        """Classifies an image using simple KNN (k=3) approach."""
+    def classify(self, image: Image.Image, filename: Optional[str] = None) -> str:
+        """Classifies an image using simple KNN (k=3) approach, weighing the filename if provided."""
         if not self.trained:
             if not self.train():
                 return "N/A"
@@ -81,6 +81,15 @@ class ImageClassifier:
 
         distances = []
         for category, cat_feats in self.features.items():
+            # Name boost: if category name is in the filename, we give it a massive advantage
+            name_boost = 1.0
+            if filename:
+                cat_lower = category.lower()
+                file_lower = filename.lower()
+                # Check for direct inclusion or with common separators
+                if cat_lower in file_lower:
+                    name_boost = 0.05 # 95% distance reduction
+
             for feat in cat_feats:
                 # Calculate distances
                 ar_dist = abs(new_feat["aspect_ratio"] - feat["aspect_ratio"])
@@ -98,7 +107,9 @@ class ImageClassifier:
                 else:
                     total_dist = (ar_dist * 15) + (hist_dist / 800) + (sharp_dist * 5)
                 
-                distances.append((total_dist, category))
+                # Apply filename boost
+                final_dist = total_dist * name_boost
+                distances.append((final_dist, category))
         
         if not distances:
             return "Sem dados"

@@ -26,7 +26,7 @@ def test_classification():
         files = list(folder.iterdir())
         if not files: continue
         with Image.open(files[0]) as img:
-            res = prod_cls.classify(img)
+            res = prod_cls.classify(img, filename=files[0].name)
             print(f"File: {files[0].name} | Exp: {expected} | Res: {res}")
 
     # Testar Qualidade
@@ -42,7 +42,7 @@ def test_classification():
         files = list(folder.iterdir())
         if not files: continue
         with Image.open(files[0]) as img:
-            res = qual_cls.classify(img)
+            res = qual_cls.classify(img, filename=files[0].name)
             print(f"File: {files[0].name} | Exp: {expected} | Res: {res}")
             
             # Testar a escrita combinada

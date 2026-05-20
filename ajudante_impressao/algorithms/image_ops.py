@@ -14,10 +14,16 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 VALID_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-def add_label_to_image(img: Image.Image, text: str) -> Image.Image:
-    """Adiciona uma margem na parte inferior da imagem e escreve o rótulo nela."""
-    # Tamanho da fonte proporcional à altura da imagem
-    font_size = max(20, int(img.height * 0.03))
+def add_label_to_image(img: Image.Image, text: str, position: str = "external_bottom_right") -> Image.Image:
+    """Adiciona um rótulo de tipo de produção à imagem, em modo externo (com margem de exatamente 1cm) ou sobreposto (overlay)."""
+    if position.startswith("external_"):
+        # Margem externa de exatamente 1.0 cm (39 pixels a 100 DPI)
+        padding_h = cm_to_px(1.0)
+        # Tamanho da fonte fixo e elegante para caber perfeitamente no espaço de 1.0 cm
+        font_size = 15
+    else:
+        # Tamanho da fonte proporcional à altura da imagem para o modo sobreposto
+        font_size = max(20, int(img.height * 0.03))
     
     try:
         font = ImageFont.truetype("arial.ttf", font_size)
@@ -33,22 +39,40 @@ def add_label_to_image(img: Image.Image, text: str) -> Image.Image:
     tw = text_bbox[2] - text_bbox[0]
     th = text_bbox[3] - text_bbox[1]
     
-    # Criar uma margem inferior sólida branca ou transparente
-    # Vamos usar transparente, mas o fundo do texto será sólido
-    padding_h = th + 30
-    
-    # Usar expand para adicionar a borda inferior
-    new_img = ImageOps.expand(img, border=(0, 0, 0, padding_h), fill=(0, 0, 0, 0))
-    
+    if position.startswith("external_"):
+        padding_h = cm_to_px(1.0)
+        new_img = ImageOps.expand(img, border=(0, 0, 0, padding_h), fill=(0, 0, 0, 0))
+        # Centralizado verticalmente na margem de 1.0 cm abaixo da imagem
+        y = img.height + (padding_h - th) // 2
+        
+        if position == "external_bottom_right":
+            x = new_img.width - tw - 15
+        elif position == "external_bottom_left":
+            x = 15
+        else:  # external_bottom_center
+            x = (new_img.width - tw) // 2
+            
+    else:  # overlay_ (sobreposto diretamente sobre a imagem, no local indicado)
+        new_img = img.copy()
+        margin_offset = 12
+        if position == "overlay_bottom_right":
+            x = new_img.width - tw - margin_offset
+            y = new_img.height - th - margin_offset
+        elif position == "overlay_bottom_left":
+            x = margin_offset
+            y = new_img.height - th - margin_offset
+        elif position == "overlay_top_right":
+            x = new_img.width - tw - margin_offset
+            y = margin_offset
+        elif position == "overlay_top_left":
+            x = margin_offset
+            y = margin_offset
+        else:  # fallback
+            x = new_img.width - tw - margin_offset
+            y = new_img.height - th - margin_offset
+
     draw = ImageDraw.Draw(new_img)
-    
-    # Posição: centralizado horizontalmente na nova margem ou no canto?
-    # O usuário prefere no canto para organização
-    x = new_img.width - tw - 15
-    y = img.height + 10 # 10 pixels de distância da arte original
-    
-    # Fundo do texto SÓLIDO para garantir que não seja ignorado no crop (se houver um)
-    # E para ser 100% legível fora da arte
+    # Fundo do texto SÓLIDO para garantir legibilidade de 100%
     draw.rectangle([x - 8, y - 5, x + tw + 8, y + th + 8], fill=(255, 255, 255, 255))
     draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
     
@@ -155,13 +179,10 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
                 from .classifier import get_prod_classifier, get_quality_classifier
                 
                 prod_cls = get_prod_classifier()
-                category = prod_cls.classify(im)
+                category = prod_cls.classify(im, filename=file.name)
                 
                 quality_cls = get_quality_classifier()
-                quality = quality_cls.classify(im)
-                
-                # Na imagem, escrevemos apenas o tipo (categoria)
-                im = add_label_to_image(im, category)
+                quality = quality_cls.classify(im, filename=file.name)
                 
                 class_log = f"  🏷️  Tipo: {category} | Qualidade: {quality}"
             except Exception as e:
@@ -194,9 +215,9 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
 
 
 def _get_cache_key(file: Path, threshold: int) -> str:
-    # Gerar um hash baseado no caminho, tamanho, data e threshold
+    # Gerar um hash baseado no caminho, tamanho, data e threshold (v2 - imagens limpas)
     stats = file.stat()
-    data = f"{file.absolute()}|{stats.st_size}|{stats.st_mtime}|{threshold}"
+    data = f"v2|{file.absolute()}|{stats.st_size}|{stats.st_mtime}|{threshold}"
     return hashlib.md5(data.encode()).hexdigest()
 
 
