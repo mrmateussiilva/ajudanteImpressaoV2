@@ -14,16 +14,18 @@ from PIL import Image, ImageOps, ImageDraw, ImageFont
 VALID_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
 
-def add_label_to_image(img: Image.Image, text: str, position: str = "external_bottom_right") -> Image.Image:
-    """Adiciona um rótulo de tipo de produção à imagem, em modo externo (com margem de exatamente 1cm) ou sobreposto (overlay)."""
+def add_label_to_image(img: Image.Image, text: str, position: str = "external_bottom_right", font_pt: int = 30) -> Image.Image:
+    """Adiciona um rótulo de tipo de produção à imagem, em modo externo (com margem de exatamente 1cm) ou sobreposto (overlay).
+    O parâmetro **font_pt** permite definir o tamanho da fonte em pontos; o padrão é 30pt.
+    """
     if position.startswith("external_"):
         # Margem externa de exatamente 1.0 cm (39 pixels a 100 DPI)
         padding_h = cm_to_px(1.0)
-        # Tamanho da fonte fixo e elegante para caber perfeitamente no espaço de 1.0 cm
-        font_size = 15
+        # Usa o tamanho de fonte especificado (default 30pt) para a legenda externa
+        font_size = font_pt
     else:
-        # Tamanho da fonte proporcional à altura da imagem para o modo sobreposto
-        font_size = max(20, int(img.height * 0.03))
+        # Tamanho da fonte proporcional à altura da imagem, garantindo que não seja menor que font_pt
+        font_size = max(font_pt, int(img.height * 0.03))
     
     try:
         font = ImageFont.truetype("arial.ttf", font_size)

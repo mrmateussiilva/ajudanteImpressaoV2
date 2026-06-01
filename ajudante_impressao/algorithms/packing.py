@@ -127,7 +127,7 @@ def pack_images_fast(images: List[Image.Image], max_width: int, spacing: int, ma
     return placed, max_width, final_height
 
 
-def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False):
+def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, performance_mode: str = "balanced"):
     usable_width = max_width - 2 * margin
     prepared = []
 
@@ -137,51 +137,103 @@ def pack_images_tight(images: List[Image.Image], max_width: int, spacing: int, m
             rot = img.rotate(90, expand=True)
             if rot.width <= usable_width:
                 variants.append(rot)
+        prepared.append({"variants": variants})
 
-        normalized_variants = []
-        for variant in variants:
-            normalized_variants.append(variant)
-
-        best_variant = max(normalized_variants, key=lambda im: (im.width * im.height, im.width, im.height))
-        prepared.append(best_variant)
-
-    prepared.sort(key=lambda im: (im.width * im.height, im.height, im.width), reverse=True)
+    prepared.sort(key=lambda item: (item["variants"][0].width * item["variants"][0].height, item["variants"][0].height, item["variants"][0].width), reverse=True)
+    
     profile = np.full(max_width, margin, dtype=np.int32)
     placed = []
     max_y_used = margin
+    
     step = max(1, step)
+    fine_step = 1 if performance_mode in ("quality", "balanced") else 2
+    lookahead = 3 if performance_mode in ("quality", "balanced") else 1
+    
+    remaining = prepared.copy()
+    
+    while remaining:
+        best_overall_choice = None
+        best_piece_index = -1
+        current_lookahead = min(len(remaining), lookahead)
+        
+        for i in range(current_lookahead):
+            piece = remaining[i]
+            best_choice = None
+            
+            for variant in piece["variants"]:
+                w, h = variant.size
+                x_start = margin
+                x_end = max_width - margin - w
+                if x_end < x_start:
+                    x_end = x_start
 
-    for img in prepared:
-        w, h = img.size
-        x_start = margin
-        x_end = max_width - margin - w
+                best_x = margin
+                best_y = None
+                best_bottom = None
 
-        if x_end < x_start:
-            x_end = x_start  # Manter no início se for maior que o rolo
+                for x in range(x_start, x_end + 1, step):
+                    y = int(profile[x:x + w].max())
+                    bottom = y + h
+                    if best_bottom is None or bottom < best_bottom or (bottom == best_bottom and y < best_y):
+                        best_x = x
+                        best_y = y
+                        best_bottom = bottom
+                        
+                if step > fine_step:
+                    fine_start = max(x_start, best_x - step)
+                    fine_end = min(x_end, best_x + step)
+                    for x in range(fine_start, fine_end + 1, fine_step):
+                        y = int(profile[x:x + w].max())
+                        bottom = y + h
+                        if bottom < best_bottom or (bottom == best_bottom and y < best_y):
+                            best_x = x
+                            best_y = y
+                            best_bottom = bottom
 
-        best_x = margin
-        best_y = None
-        best_bottom = None
+                if best_y is None:
+                    best_x = margin
+                    best_y = max_y_used + spacing
+                    best_bottom = best_y + h
+                    
+                choice_score = (best_bottom, best_y, -(w * h))
+                if best_choice is None or choice_score < best_choice["score"]:
+                    best_choice = {"variant": variant, "x": best_x, "y": best_y, "bottom": best_bottom, "score": choice_score}
+                    
+            if best_overall_choice is None or best_choice["score"] < best_overall_choice["score"]:
+                best_overall_choice = best_choice
+                best_piece_index = i
+                
+        remaining.pop(best_piece_index)
+        variant = best_overall_choice["variant"]
+        best_x = best_overall_choice["x"]
+        best_y = best_overall_choice["y"]
+        w, h = variant.size
+        
+        cx, cy = best_x, best_y
+        for _ in range(3):
+            moved = False
+            while cx - 1 >= margin:
+                y_left = int(profile[cx - 1 : cx - 1 + w].max())
+                if y_left <= cy:
+                    cx -= 1
+                    moved = True
+                else:
+                    break
+            while cy - 1 >= margin and cy - 1 >= int(profile[cx : cx + w].max()):
+                cy -= 1
+                moved = True
+            if not moved:
+                break
+                
+        best_x, best_y = cx, cy
+        best_bottom = best_y + h
 
-        for x in range(x_start, x_end + 1, step):
-            y = int(profile[x:x + w].max())
-            bottom = y + h
-            if best_bottom is None or bottom < best_bottom or (bottom == best_bottom and y < best_y):
-                best_x = x
-                best_y = y
-                best_bottom = bottom
-
-        if best_y is None:
-            best_x = margin
-            best_y = max_y_used + spacing
-            best_bottom = best_y + h
-
-        placed.append((img, best_x, best_y))
+        placed.append((variant, best_x, best_y))
         max_y_used = max(max_y_used, best_bottom)
 
         reserve_start = max(margin, best_x - spacing)
         reserve_end = min(max_width - margin, best_x + w + spacing)
-        profile[reserve_start:reserve_end] = max(profile[reserve_start:reserve_end].max(), best_bottom + spacing)
+        profile[reserve_start:reserve_end] = np.maximum(profile[reserve_start:reserve_end], best_bottom + spacing)
 
     final_height = max_y_used + margin
     return placed, max_width, final_height
@@ -261,18 +313,26 @@ if HAS_NUMBA:
     @numba.njit(nogil=True)
     def _nudge_gravity_jit(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, margin: int, max_occ_y: int) -> tuple[int, int]:
         cx, cy = x, y
-        for _ in range(2):
+        for _ in range(4):
+            moved = False
             while cy - 1 >= margin and not _collides_jit(occupancy, mask, cx, cy - 1, max_occ_y):
                 cy -= 1
+                moved = True
             while cx - 1 >= margin and not _collides_jit(occupancy, mask, cx - 1, cy, max_occ_y):
                 cx -= 1
+                moved = True
+            while cy - 1 >= margin and cx - 1 >= margin and not _collides_jit(occupancy, mask, cx - 1, cy - 1, max_occ_y):
+                cy -= 1
+                cx -= 1
+                moved = True
+            if not moved:
+                break
         return cx, cy
 
     @numba.njit(nogil=True)
-    def _evaluate_batch_jit(occupancy: np.ndarray, mask: np.ndarray, candidates: np.ndarray, max_y_used: int, max_occ_y: int, max_width: int):
-        # Avalia um lote de candidatos em paralelo (aproveita todos os cores)
+    def _evaluate_batch_jit(occupancy: np.ndarray, mask: np.ndarray, candidates: np.ndarray, max_y_used: int, max_occ_y: int, max_width: int, margin: int):
         num = len(candidates)
-        scores = np.full((num, 4), 99999999, dtype=np.int32)
+        scores = np.full((num, 5), 99999999, dtype=np.int32)
         h_mask = mask.shape[0]
         w_mask = mask.shape[1]
         
@@ -281,15 +341,19 @@ if HAS_NUMBA:
             if not _collides_jit(occupancy, mask, fx, fy, max_occ_y):
                 bottom = fy + h_mask
                 center_dist = abs(fx + w_mask // 2 - max_width // 2)
+                space_right = max_width - margin - (fx + w_mask)
+                fragmentation_penalty = 1 if (0 < space_right < 50) else 0
+                
                 scores[i, 0] = max(bottom, max_y_used)
                 scores[i, 1] = fy
-                scores[i, 2] = bottom
-                scores[i, 3] = -center_dist
+                scores[i, 2] = fragmentation_penalty
+                scores[i, 3] = bottom
+                scores[i, 4] = -center_dist
         
         best_idx = -1
-        best_val = (99999999, 99999999, 99999999, 99999999)
+        best_val = (99999999, 99999999, 99999999, 99999999, 99999999)
         for i in range(num):
-            s = (scores[i, 0], scores[i, 1], scores[i, 2], scores[i, 3])
+            s = (scores[i, 0], scores[i, 1], scores[i, 2], scores[i, 3], scores[i, 4])
             if s < best_val:
                 best_val = s
                 best_idx = i
@@ -364,14 +428,14 @@ def _stamp_reserved(occupancy: np.ndarray, mask: np.ndarray, x: int, y: int, spa
         occupancy[dst_y0:dst_y1, dst_x0:dst_x1] |= dilated[src_y0:src_y1, src_x0:src_x1]
 
 
-def _score_candidate(mask: np.ndarray, x: int, y: int, max_width: int, margin: int, max_y_used: int) -> tuple[int, int, int, int]:
+def _score_candidate(mask: np.ndarray, x: int, y: int, max_width: int, margin: int, max_y_used: int, area: int) -> tuple:
     bottom = y + mask.shape[0]
-    # Prioridade 1: Minimizar o aumento do rolo
-    # Prioridade 2: Minimizar o topo da peça (afundar o máximo possível nos buracos)
-    # Prioridade 3: Minimizar a base da peça
-    # Prioridade 4: Favorecer encostar nas bordas (x pequeno ou x grande)
+    increases_height = 1 if bottom > max_y_used else 0
+    height_increase = max(0, bottom - max_y_used)
     center_dist = abs(x + mask.shape[1] // 2 - max_width // 2)
-    return (max(bottom, max_y_used), y, bottom, -center_dist)
+    space_right = max_width - margin - (x + mask.shape[1])
+    fragmentation_penalty = 1 if (0 < space_right < 50) else 0
+    return (increases_height, height_increase, fragmentation_penalty, -area, y, bottom, -center_dist)
 
 
 def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, margin: int, step: int = 8, allow_rotate: bool = False, progress_cb=None, performance_mode: str = "balanced"):
@@ -451,29 +515,46 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                 
                 try:
                     if factor > 1:
-                        mask_c = cv2.resize(mask, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                        mask_f = mask.astype(np.float32)
                         occ_slice = occupancy[:search_h, :]
-                        occ_c = cv2.resize(occ_slice, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                        occ_f = occ_slice.astype(np.float32)
+                        mask_c = cv2.resize(mask_f, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
+                        occ_c = cv2.resize(occ_f, (0, 0), fx=1/factor, fy=1/factor, interpolation=cv2.INTER_AREA)
                         res_c = cv2.matchTemplate(occ_c, mask_c, cv2.TM_CCORR)
                         
-                        coarse_thresh = 1.0 if factor <= 2 else 2.0
+                        # Threshold normalizado: razão entre overlap e área da máscara
+                        # Limitado a top-N candidatos por linha para evitar explosão quando occupancy está vazio
+                        mask_sum = max(1.0, mask_c.sum())
+                        res_c_norm = res_c / mask_sum
+                        # thresh dinâmico: mais liberal se occupancy vazio, mais restrito depois
+                        occ_filled = float(np.count_nonzero(occupancy)) / max(1, occupancy.size)
+                        coarse_thresh = 0.05 if occ_filled > 0.01 else 0.001
+                        MAX_CANDIDATES_PER_ROW = 8  # Limita explosão combinatória
+                        found_any_in_coarse = False
                         
                         # BUSCA EXAUSTIVA: Agora olhamos o rolo inteiro sem limite de linhas
-                        for cy in range(margin // factor, res_c.shape[0]):
+                        for cy in range(margin // factor, res_c_norm.shape[0]):
                             base_y = cy * factor
                             min_y = base_y - factor
                             min_bottom = min_y + h
                             
                             if variant_best is not None:
-                                best_s0 = variant_best["score"][0]
-                                best_s1 = variant_best["score"][1] # Agora é o 'y' no score
-                                if max(min_bottom, max_y_used) > best_s0:
+                                # score agora tem 7 elementos: (increases_h, h_inc, frag, -area, y, bottom, -dist)
+                                best_bottom = variant_best["score"][5]
+                                best_y = variant_best["score"][4]
+                                if min_bottom > best_bottom:
                                     break
-                                if max(min_bottom, max_y_used) == best_s0 and min_y > best_s1:
+                                if min_bottom == best_bottom and min_y > best_y:
                                     break
 
-                            row_c = res_c[cy, (margin // factor) : (max_width - w) // factor + 1]
-                            promising_cx_indices = np.where(row_c <= coarse_thresh)[0] 
+                            row_c = res_c_norm[cy, (margin // factor) : (max_width - w) // factor + 1]
+                            all_promising = np.where(row_c <= coarse_thresh)[0]
+                            # Ordenar pelos menores valores (mais promissores) e limitar quantidade
+                            if all_promising.size > MAX_CANDIDATES_PER_ROW:
+                                top_indices = np.argsort(row_c[all_promising])[:MAX_CANDIDATES_PER_ROW]
+                                promising_cx_indices = all_promising[top_indices]
+                            else:
+                                promising_cx_indices = all_promising
                             
                             if promising_cx_indices.size > 0:
                                 found_any_in_coarse = True
@@ -491,8 +572,16 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                                             batch.append((fx, fy))
                                 
                                 if batch and HAS_NUMBA and _evaluate_batch_jit is not None:
-                                    idx, score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used, max_occ_y, max_width)
+                                    idx, raw_score = _evaluate_batch_jit(occupancy, mask, np.array(batch, dtype=np.int32), max_y_used, max_occ_y, max_width, margin)
                                     if idx != -1:
+                                        bottom = raw_score[3]
+                                        fy = raw_score[1]
+                                        minus_center_dist = raw_score[4]
+                                        fragmentation_penalty = raw_score[2]
+                                        increases_height = 1 if bottom > max_y_used else 0
+                                        height_increase = max(0, bottom - max_y_used)
+                                        score = (increases_height, height_increase, fragmentation_penalty, -variant["area"], fy, bottom, minus_center_dist)
+                                        
                                         if variant_best is None or score < variant_best["score"]:
                                             bx, by = batch[idx]
                                             variant_best = {"image": img, "mask": mask, "x": bx, "y": by, "score": score}
@@ -500,7 +589,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                                     # Fallback se batch for pequeno ou sem Numba
                                     for fx, fy in batch:
                                         if not _collides(occupancy, mask, fx, fy, max_occ_y):
-                                            score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                            score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used, variant["area"])
                                             if variant_best is None or score < variant_best["score"]:
                                                 variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
                         
@@ -513,11 +602,11 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                             found_at_fy = False
                             for fx in range(margin, max_width - margin - w + 1, step):
                                 if not _collides(occupancy, mask, fx, fy, max_occ_y):
-                                    score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used)
+                                    score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used, variant["area"])
                                     if variant_best is None or score < variant_best["score"]:
                                         variant_best = {"image": img, "mask": mask, "x": fx, "y": fy, "score": score}
                                         found_at_fy = True
-                            if found_at_fy and variant_best["score"][1] < max_y_used:
+                            if found_at_fy and variant_best["score"][4] < max_y_used:
                                 break # Encontramos uma vaga num "buraco" acima do final do rolo
 
                 except Exception:
@@ -528,7 +617,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                         found_at_y = False
                         while x + w <= max_width - margin:
                             if not _collides(occupancy, mask, x, y, max_occ_y):
-                                score = _score_candidate(mask, x, y, max_width, margin, max_y_used)
+                                score = _score_candidate(mask, x, y, max_width, margin, max_y_used, variant["area"])
                                 variant_best = {"image": img, "mask": mask, "x": x, "y": y, "score": score}
                                 found_at_y = True
                                 break
@@ -540,7 +629,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                 if variant_best is not None:
                     if best_choice is None or variant_best["score"] < best_choice["score"]:
                         best_choice = variant_best
-
+ 
             if best_choice is None:
                 fallback = piece["variants"][0]
                 img = fallback["image"]
@@ -552,7 +641,7 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
                     if not _collides(occupancy, mask, x, y, max_occ_y):
                         break
                     x += step
-                best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used)}
+                best_choice = {"image": img, "mask": mask, "x": x, "y": y, "score": _score_candidate(mask, x, y, max_width, margin, max_y_used, fallback["area"])}
 
             if best_overall_choice is None or best_choice["score"] < best_overall_choice["score"]:
                 best_overall_choice = best_choice
@@ -573,11 +662,20 @@ def pack_images_masked(images: List[Image.Image], max_width: int, spacing: int, 
             x, y = _nudge_gravity_jit(occupancy, mask, x, y, margin, max_occ_y)
         else:
             max_occ_y = max_y_used + spacing
-            for _ in range(2):
+            for _ in range(4):
+                moved = False
                 while y - 1 >= margin and not _collides(occupancy, mask, x, y - 1, max_occ_y):
                     y -= 1
+                    moved = True
                 while x - 1 >= margin and not _collides(occupancy, mask, x - 1, y, max_occ_y):
                     x -= 1
+                    moved = True
+                while y - 1 >= margin and x - 1 >= margin and not _collides(occupancy, mask, x - 1, y - 1, max_occ_y):
+                    y -= 1
+                    x -= 1
+                    moved = True
+                if not moved:
+                    break
 
         placed.append((img, x, y))
         _stamp_reserved(occupancy, mask, x, y, spacing, margin, max_width)

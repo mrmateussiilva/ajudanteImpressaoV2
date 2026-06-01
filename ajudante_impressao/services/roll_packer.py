@@ -151,6 +151,7 @@ def run_roll_packer(
             margin=margin_px,
             step=effective_step,
             allow_rotate=request.allow_rotate,
+            performance_mode=request.performance_mode,
         )
 
     log_fn(

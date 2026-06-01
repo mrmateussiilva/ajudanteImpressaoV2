@@ -46,20 +46,20 @@ def build_stylesheet(theme_name: str) -> str:
     }}
     QLabel#title {{
         color: {colors['accent']};
-        font-size: 22px;
+        font-size: 26px;
         font-weight: 700;
     }}
     QLabel#subtitle, QLabel#section, QLabel#muted {{
         color: {colors['muted']};
     }}
     QLabel#section {{
-        font-size: 11px;
+        font-size: 14px;
         font-weight: 700;
         letter-spacing: 1px;
     }}
     QLabel#fieldLabel {{
         color: {colors['muted']};
-        font-size: 10px;
+        font-size: 12px;
         font-weight: 700;
         letter-spacing: 0.4px;
         text-transform: uppercase;
@@ -87,7 +87,7 @@ def build_stylesheet(theme_name: str) -> str:
         min-height: 34px;
         padding: 6px 10px;
         color: {colors['text']};
-        font-size: 14px;
+        font-size: 16px;
         font-weight: 600;
     }}
     QLineEdit#fieldInput:focus {{
