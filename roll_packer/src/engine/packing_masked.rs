@@ -77,7 +77,7 @@ pub fn pack_images_masked(
     let mut max_y_used = margin_u;
 
     for variants in prepared {
-        let mut best_choice: Option<((usize, usize), (usize, usize, usize, isize), &MaskVariant)> = None;
+        let mut best_choice: Option<((usize, usize), (usize, std::cmp::Reverse<usize>, usize, usize, usize, isize), &MaskVariant)> = None;
         let spacing_u = spacing as usize;
 
         for variant in &variants {
@@ -97,7 +97,7 @@ pub fn pack_images_masked(
             }
 
             let y_limit = max_y_used + spacing_u;
-            let mut variant_best: Option<((usize, usize), (usize, usize, usize, isize), &MaskVariant)> = None;
+            let mut variant_best: Option<((usize, usize), (usize, std::cmp::Reverse<usize>, usize, usize, usize, isize), &MaskVariant)> = None;
 
             for fy in (margin_u..=y_limit).step_by(step) {
                 let mut found_at_fy = false;
@@ -119,7 +119,16 @@ pub fn pack_images_masked(
                     if !collides {
                         let bottom = fy + h;
                         let center_dist = ((fx + w / 2) as isize - (max_width_u / 2) as isize).abs();
-                        let score = (max(bottom, max_y_used), bottom, fy, center_dist);
+                        let increases_height = if bottom > max_y_used { 1 } else { 0 };
+                        let height_increase = bottom.saturating_sub(max_y_used);
+                        let score = (
+                            increases_height,
+                            std::cmp::Reverse(mask.area),
+                            height_increase,
+                            fy,
+                            bottom,
+                            center_dist,
+                        );
                         
                         if variant_best.is_none() || score < variant_best.unwrap().1 {
                             variant_best = Some(((fx, fy), score, variant));
@@ -127,7 +136,7 @@ pub fn pack_images_masked(
                         }
                     }
                 }
-                if found_at_fy && variant_best.as_ref().unwrap().1.1 < max_y_used {
+                if found_at_fy && variant_best.as_ref().unwrap().1.4 < max_y_used {
                     break;
                 }
             }
@@ -142,7 +151,7 @@ pub fn pack_images_masked(
         let (final_pos, _, var) = best_choice.unwrap_or_else(|| {
             // Fallback
             let var = &variants[0];
-            ((margin_u, max_y_used + spacing_u), (0,0,0,0), var)
+            ((margin_u, max_y_used + spacing_u), (0, std::cmp::Reverse(0), 0, 0, 0, 0), var)
         });
 
         // Nudge gravity — limitado para não ser O(h × w × distancia)
@@ -183,16 +192,33 @@ pub fn pack_images_masked(
             x -= 1;
         }
 
-        // Stamp: retangular O((w+2s)×(h+2s)) em vez de O(w×h×s²)
-        // Marca o bbox expandido pelo spacing — rápido e correto para retângulos
-        let sy0 = y.saturating_sub(spacing_u).max(margin_u);
-        let sy1 = min(occ_height, y + h + spacing_u);
-        let sx0 = x.saturating_sub(spacing_u).max(margin_u);
-        let sx1 = min(max_width_u - margin_u, x + w + spacing_u);
-        for dy in sy0..sy1 {
-            let row = dy * max_width_u;
-            for dx in sx0..sx1 {
-                occupancy[row + dx] = true;
+        // Stamp: dilatação circular baseada em máscara
+        let spacing_sq = (spacing_u * spacing_u) as isize;
+        for my in 0..h {
+            for mx in 0..w {
+                if var.mask.data[my * w + mx] {
+                    let px_x = (x + mx) as isize;
+                    let px_y = (y + my) as isize;
+                    
+                    let dy_start = max(margin_u as isize, px_y - spacing_u as isize);
+                    let dy_end = min(occ_height as isize, px_y + spacing_u as isize + 1);
+                    
+                    let dx_start = max(margin_u as isize, px_x - spacing_u as isize);
+                    let dx_end = min((max_width_u - margin_u) as isize, px_x + spacing_u as isize + 1);
+                    
+                    for dy in dy_start..dy_end {
+                        let row_idx = dy as usize * max_width_u;
+                        let dist_y = dy - px_y;
+                        let dist_y_sq = dist_y * dist_y;
+                        
+                        for dx in dx_start..dx_end {
+                            let dist_x = dx - px_x;
+                            if dist_x * dist_x + dist_y_sq <= spacing_sq {
+                                occupancy[row_idx + dx as usize] = true;
+                            }
+                        }
+                    }
+                }
             }
         }
 
