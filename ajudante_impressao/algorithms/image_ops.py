@@ -8,53 +8,76 @@ from pathlib import Path
 from typing import Any, List
 
 import numpy as np
+import functools
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
 
 VALID_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
+_temp_img = Image.new("RGBA", (1, 1))
+_temp_draw = ImageDraw.Draw(_temp_img)
 
-def add_label_to_image(img: Image.Image, text: str, position: str = "external_bottom_right", font_pt: int = 30) -> Image.Image:
-    """Adiciona um rótulo de tipo de produção à imagem, em modo externo (com margem de exatamente 1cm) ou sobreposto (overlay).
-    O parâmetro **font_pt** permite definir o tamanho da fonte em pontos; o padrão é 30pt.
-    """
-    if position.startswith("external_"):
-        # Margem externa de exatamente 1.0 cm (39 pixels a 100 DPI)
-        padding_h = cm_to_px(1.0)
-        # Usa o tamanho de fonte especificado (default 30pt) para a legenda externa
-        font_size = font_pt
-    else:
-        # Tamanho da fonte proporcional à altura da imagem, garantindo que não seja menor que font_pt
-        font_size = max(font_pt, int(img.height * 0.03))
-    
+@functools.lru_cache(maxsize=16)
+def _get_font(font_size: int):
     try:
-        font = ImageFont.truetype("arial.ttf", font_size)
+        return ImageFont.truetype("arial.ttf", font_size)
     except Exception:
         try:
-            font = ImageFont.truetype("segoeui.ttf", font_size)
+            return ImageFont.truetype("segoeui.ttf", font_size)
         except Exception:
-            font = ImageFont.load_default()
+            return ImageFont.load_default()
 
-    # Calcular tamanho do texto
-    temp_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    text_bbox = temp_draw.textbbox((0, 0), text, font=font)
+
+def add_label_to_image(
+    img: Image.Image,
+    text: str,
+    position: str = "external_bottom_right",
+    font_pt: int = 30,
+    date_str: str = "",
+    text_color: tuple[int, int, int, int] = (0, 0, 0, 255),
+) -> Image.Image:
+    """Adiciona um rótulo de tipo de produção à imagem, em modo externo (com margem de
+    exatamente 1cm) ou sobreposto (overlay).
+
+    Parâmetros:
+        font_pt    -- tamanho da fonte em pontos (padrão 30pt)
+        date_str   -- data de envio opcional; se fornecida, é exibida em uma segunda linha
+        text_color -- cor RGBA do texto (padrão preto); o fundo do box é sempre branco
+    """
+    # Monta o texto final (categoria + data opcional na linha de baixo)
+    label_lines = [text]
+    if date_str.strip():
+        label_lines.append(f"Envio: {date_str.strip()}")
+    full_text = "\n".join(label_lines)
+
+    if position.startswith("external_"):
+        font_size = font_pt
+    else:
+        font_size = max(font_pt, int(img.height * 0.03))
+
+    font = _get_font(font_size)
+
+    # Calcular tamanho do bloco de texto (suporte a múltiplas linhas)
+    text_bbox = _temp_draw.textbbox((0, 0), full_text, font=font)
     tw = text_bbox[2] - text_bbox[0]
     th = text_bbox[3] - text_bbox[1]
-    
+
     if position.startswith("external_"):
         padding_h = cm_to_px(1.0)
+        # Se tiver duas linhas, expande a margem extra para acomodar
+        if date_str.strip():
+            padding_h = max(padding_h, th + 20)
         new_img = ImageOps.expand(img, border=(0, 0, 0, padding_h), fill=(0, 0, 0, 0))
-        # Centralizado verticalmente na margem de 1.0 cm abaixo da imagem
         y = img.height + (padding_h - th) // 2
-        
+
         if position == "external_bottom_right":
             x = new_img.width - tw - 15
         elif position == "external_bottom_left":
             x = 15
         else:  # external_bottom_center
             x = (new_img.width - tw) // 2
-            
-    else:  # overlay_ (sobreposto diretamente sobre a imagem, no local indicado)
+
+    else:  # overlay_
         new_img = img.copy()
         margin_offset = 12
         if position == "overlay_bottom_right":
@@ -74,10 +97,10 @@ def add_label_to_image(img: Image.Image, text: str, position: str = "external_bo
             y = new_img.height - th - margin_offset
 
     draw = ImageDraw.Draw(new_img)
-    # Fundo do texto SÓLIDO para garantir legibilidade de 100%
+    # Fundo branco sólido para garantir legibilidade independente da cor do texto
     draw.rectangle([x - 8, y - 5, x + tw + 8, y + th + 8], fill=(255, 255, 255, 255))
-    draw.text((x, y), text, fill=(0, 0, 0, 255), font=font)
-    
+    draw.text((x, y), full_text, fill=text_color, font=font)
+
     return new_img
 
 

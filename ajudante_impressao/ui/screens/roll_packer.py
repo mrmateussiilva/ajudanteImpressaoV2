@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QFont, QIcon, QImage, QPixmap, QTextCursor
+from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -122,6 +124,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._preview_pixmap: QPixmap | None = None
         self._debug_pixmaps: list[QPixmap] = []
         self._loaded_image_items: list[dict] = []
+        self._label_text_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # preto padrão
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -225,6 +228,34 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.label_pos_combo.setCurrentText("Externo - Inferior Direita")
         config_layout.addWidget(self.label_pos_combo)
 
+        # --- Data de Envio ---
+        config_layout.addWidget(self.field_label("Data de envio (opcional)"))
+        self.label_date_edit = QDateEdit()
+        self.label_date_edit.setDisplayFormat("dd/MM/yyyy")
+        self.label_date_edit.setCalendarPopup(True)
+        self.label_date_edit.setDate(QDate.currentDate())
+        self.label_date_edit.setObjectName("fieldInput")
+        self.label_date_edit.setMinimumHeight(36)
+        self.label_date_checkbox = QCheckBox("Incluir data de envio no rótulo")
+        config_layout.addWidget(self.label_date_checkbox)
+        config_layout.addWidget(self.label_date_edit)
+
+        # --- Cor do Texto ---
+        config_layout.addWidget(self.field_label("Cor do texto do rótulo"))
+        color_row = QHBoxLayout()
+        color_row.setSpacing(8)
+        self._color_swatch = QLabel()
+        self._color_swatch.setFixedSize(32, 32)
+        self._color_swatch.setStyleSheet(
+            "background-color: #000000; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);"
+        )
+        color_row.addWidget(self._color_swatch)
+        self._color_btn = QPushButton("Escolher cor")
+        self._color_btn.setMinimumHeight(32)
+        self._color_btn.clicked.connect(self._pick_label_color)
+        color_row.addWidget(self._color_btn, 1)
+        config_layout.addLayout(color_row)
+
         layout.addWidget(config_box)
 
         layout.addWidget(self.section_label("ARQUIVO DE SAIDA"))
@@ -311,7 +342,22 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         layout.addWidget(card)
         return entry
 
+    def _pick_label_color(self) -> None:
+        r, g, b, a = self._label_text_color
+        initial = QColor(r, g, b, a)
+        color = QColorDialog.getColor(
+            initial, self, "Cor do texto do rótulo",
+            QColorDialog.ColorDialogOption.ShowAlphaChannel,
+        )
+        if color.isValid():
+            self._label_text_color = (color.red(), color.green(), color.blue(), color.alpha())
+            hex_color = color.name()  # ex: "#1a2b3c"
+            self._color_swatch.setStyleSheet(
+                f"background-color: {hex_color}; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);"
+            )
+
     def _choose_folder(self) -> None:
+
         selected = QFileDialog.getExistingDirectory(self, "Selecionar pasta de imagens")
         if not selected:
             return
@@ -411,6 +457,11 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         label_pos_text = self.label_pos_combo.currentText()
         label_pos_value = self.label_pos_map.get(label_pos_text, "external_bottom_right")
 
+        # Data de envio: só inclui se o checkbox estiver marcado
+        label_date = ""
+        if self.label_date_checkbox.isChecked():
+            label_date = self.label_date_edit.date().toString("dd/MM/yyyy")
+
         request = RollerPackRequest(
             folder=self._folder,
             largura_cm=largura,
@@ -424,6 +475,8 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             output_name=output_name,
             performance_mode=self._selected_value(self.performance_radios),
             label_position=label_pos_value,
+            label_date=label_date,
+            label_text_color=self._label_text_color,
         )
 
         self.log_output.clear()

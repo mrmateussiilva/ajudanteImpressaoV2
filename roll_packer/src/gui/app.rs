@@ -1,18 +1,22 @@
 use eframe::egui;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use rfd::FileDialog;
 
 use crate::engine::packing::{pack_images_gallery, pack_images_fast, pack_images_tight};
 use crate::engine::packing_masked::pack_images_masked;
+use crate::engine::canvas::build_canvas;
+use crate::engine::output::split_and_save;
+use crate::engine::loader::{process_images, ImageItem};
+use crate::engine::classifier::Classifier;
+use crate::engine::image_ops::add_label_to_image;
+use image::{DynamicImage, GenericImageView};
 
-// Converte centímetros para pixels dado o DPI
 fn cm_to_px(cm: f32, dpi: f32) -> u32 {
     ((cm * dpi) / 2.54).round() as u32
 }
 
-// Converte pixels para centímetros dado o DPI
 fn px_to_cm(px: u32, dpi: f32) -> f32 {
     (px as f32 * 2.54) / dpi
 }
@@ -25,393 +29,388 @@ pub enum Algorithm {
     Masked,
 }
 
-// Resultado serializável para passar entre threads
+enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Ok,
+    Muted,
+}
+
+enum LoadMsg {
+    Log(String, LogLevel),
+    Progress(usize, usize),
+    Done(Vec<ImageItem>),
+    Error(String),
+}
+
 pub struct PackResult {
-    pub canvas_data: Vec<u8>, // imagem final RGBA renderizada
+    pub paths: Vec<PathBuf>,
     pub canvas_w: u32,
     pub canvas_h: u32,
-    pub canvas_h_cm: f32,
-    pub dpi: f32,
+    pub preview_w: u32,
+    pub preview_h: u32,
+    pub preview_rgba: Vec<u8>,
+}
+
+enum PackMsg {
+    Log(String, LogLevel),
+    Status(String),
+    Done(PackResult),
+    Error(String),
 }
 
 pub struct RollPackerApp {
-    image_paths: Vec<PathBuf>,
-    // Parâmetros em CM
+    folder: Option<PathBuf>,
     max_width_cm: f32,
     spacing_cm: f32,
     margin_cm: f32,
-    step_mm: f32, // step em mm para mais precisão
+    step_mm: f32,
     dpi: f32,
     allow_rotate: bool,
     algorithm: Algorithm,
     performance_mode: String,
+    label_position: String,
+    label_date_enabled: bool,
+    label_date: String,
+    label_color: [f32; 4],
+    output_name: String,
+    threshold: u8,
 
+    is_loading: bool,
     is_packing: bool,
-    tx: Sender<PackResult>,
-    rx: Receiver<PackResult>,
-
-    pack_result: Option<PackResult>,
+    loaded_items: Vec<ImageItem>,
+    log_lines: Vec<(String, LogLevel)>,
+    
     preview_texture: Option<egui::TextureHandle>,
+    preview_dims: (u32, u32),
+
+    load_tx: mpsc::Sender<LoadMsg>,
+    load_rx: mpsc::Receiver<LoadMsg>,
+    pack_tx: mpsc::Sender<PackMsg>,
+    pack_rx: mpsc::Receiver<PackMsg>,
+
+    prod_classifier: Arc<Mutex<Classifier>>,
+    quality_classifier: Arc<Mutex<Classifier>>,
     status_text: String,
+    progress: f32,
 }
 
 impl Default for RollPackerApp {
     fn default() -> Self {
-        let (tx, rx) = mpsc::channel();
+        let (load_tx, load_rx) = mpsc::channel();
+        let (pack_tx, pack_rx) = mpsc::channel();
+        
         Self {
-            image_paths: Vec::new(),
-            max_width_cm: 60.0,  // 60 cm (rolo padrão)
-            spacing_cm: 0.3,     // 3mm de espaço
-            margin_cm: 0.5,      // 5mm de margem
-            step_mm: 2.0,        // 2mm de step
-            dpi: 100.0,          // 100 DPI padrão
+            folder: None,
+            max_width_cm: 60.0,
+            spacing_cm: 0.3,
+            margin_cm: 0.5,
+            step_mm: 2.0,
+            dpi: 100.0,
             allow_rotate: false,
             algorithm: Algorithm::Fast,
             performance_mode: "balanced".to_string(),
+            label_position: "external_bottom_right".to_string(),
+            label_date_enabled: false,
+            label_date: "".to_string(),
+            label_color: [0.0, 0.0, 0.0, 1.0],
+            output_name: "rolo.jpg".to_string(),
+            threshold: 245,
+
+            is_loading: false,
             is_packing: false,
-            tx,
-            rx,
-            pack_result: None,
+            loaded_items: Vec::new(),
+            log_lines: Vec::new(),
             preview_texture: None,
-            status_text: "Carregue imagens e clique em PACK!".to_string(),
+            preview_dims: (0, 0),
+
+            load_tx,
+            load_rx,
+            pack_tx,
+            pack_rx,
+
+            prod_classifier: Arc::new(Mutex::new(Classifier::new(r"Z:\IMPRESSÃO DE TOTENS\treinamentos", "Producao"))),
+            quality_classifier: Arc::new(Mutex::new(Classifier::new(r"Z:\IMPRESSÃO DE TOTENS\qualidade", "Qualidade"))),
+            status_text: "Aguardando...".to_string(),
+            progress: 0.0,
         }
     }
 }
 
 impl eframe::App for RollPackerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Verifica se chegou resultado da thread
-        if let Ok(result) = self.rx.try_recv() {
-            self.status_text = format!(
-                "✅ Pronto! Canvas: {:.1} cm × {:.1} cm  ({} × {} px)",
-                self.max_width_cm,
-                result.canvas_h_cm,
-                result.canvas_w,
-                result.canvas_h
-            );
-
-            // Gera preview downscalado a partir do canvas real
-            let scale = if result.canvas_w > 860 {
-                860.0 / result.canvas_w as f32
-            } else {
-                1.0
-            };
-            let pw = ((result.canvas_w as f32 * scale) as usize).max(1);
-            let ph = ((result.canvas_h as f32 * scale) as usize).max(1);
-            let mut preview = vec![255u8; pw * ph * 4];
-
-            let cw = result.canvas_w as usize;
-            for sy in 0..ph {
-                let src_y = (sy as f32 / scale) as usize;
-                for sx in 0..pw {
-                    let src_x = (sx as f32 / scale) as usize;
-                    let src_idx = (src_y * cw + src_x) * 4;
-                    let dst_idx = (sy * pw + sx) * 4;
-                    if src_idx + 3 < result.canvas_data.len() {
-                        preview[dst_idx]   = result.canvas_data[src_idx];
-                        preview[dst_idx+1] = result.canvas_data[src_idx+1];
-                        preview[dst_idx+2] = result.canvas_data[src_idx+2];
-                        preview[dst_idx+3] = result.canvas_data[src_idx+3];
-                    }
+        if let Ok(msg) = self.load_rx.try_recv() {
+            match msg {
+                LoadMsg::Log(s, l) => self.log_lines.push((s, l)),
+                LoadMsg::Progress(c, t) => {
+                    self.progress = c as f32 / t as f32;
+                    self.status_text = format!("Carregando {}/{}...", c, t);
+                }
+                LoadMsg::Done(items) => {
+                    self.loaded_items = items;
+                    self.is_loading = false;
+                    self.status_text = format!("Carregado {} imagens.", self.loaded_items.len());
+                    self.log_lines.push(("Imagens carregadas com sucesso.".to_string(), LogLevel::Ok));
+                }
+                LoadMsg::Error(e) => {
+                    self.is_loading = false;
+                    self.status_text = "Erro no carregamento.".to_string();
+                    self.log_lines.push((e, LogLevel::Error));
                 }
             }
-
-            let color_image = egui::ColorImage::from_rgba_unmultiplied([pw, ph], &preview);
-            self.preview_texture = Some(ctx.load_texture("preview", color_image, Default::default()));
-            self.pack_result = Some(result);
-            self.is_packing = false;
         }
 
-        egui::SidePanel::left("controls_panel").min_width(240.0).show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.heading("🎞 Roll Packer");
-            ui.separator();
-
-            // --- Carregar imagens ---
-            if ui.button("📁 Carregar Pasta").clicked() {
-                if let Some(folder) = FileDialog::new().pick_folder() {
-                    let mut paths = Vec::new();
-                    if let Ok(entries) = std::fs::read_dir(&folder) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.is_file() {
-                                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                                    if ["png", "jpg", "jpeg", "webp"].contains(&ext.to_lowercase().as_str()) {
-                                        paths.push(path);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    paths.sort();
-                    self.status_text = format!("{} imagens carregadas", paths.len());
-                    self.image_paths = paths;
-                    self.pack_result = None;
-                    self.preview_texture = None;
+        if let Ok(msg) = self.pack_rx.try_recv() {
+            match msg {
+                PackMsg::Log(s, l) => self.log_lines.push((s, l)),
+                PackMsg::Status(s) => self.status_text = s,
+                PackMsg::Done(res) => {
+                    self.is_packing = false;
+                    self.status_text = "Empacotamento concluido!".to_string();
+                    let ci = egui::ColorImage::from_rgba_unmultiplied([res.preview_w as usize, res.preview_h as usize], &res.preview_rgba);
+                    self.preview_texture = Some(ctx.load_texture("preview", ci, Default::default()));
+                    self.preview_dims = (res.canvas_w, res.canvas_h);
+                }
+                PackMsg::Error(e) => {
+                    self.is_packing = false;
+                    self.status_text = "Erro no packing.".to_string();
+                    self.log_lines.push((e, LogLevel::Error));
                 }
             }
-            ui.label(format!("📷 {} imagens", self.image_paths.len()));
+        }
+
+        egui::SidePanel::left("sidebar").min_width(320.0).show(ctx, |ui| {
+            ui.heading("Roll Packer Rust");
             ui.separator();
-
-            // --- Parâmetros em CM ---
-            egui::Grid::new("params_grid")
-                .num_columns(2)
-                .spacing([8.0, 8.0])
-                .show(ui, |ui| {
-                    ui.label("🖨 DPI:");
-                    ui.add(
-                        egui::DragValue::new(&mut self.dpi)
-                            .range(72.0..=1200.0)
-                            .speed(1.0)
-                            .suffix(" dpi"),
-                    );
-                    ui.end_row();
-
-                    ui.label("📐 Largura max (cm):");
-                    ui.add(
-                        egui::DragValue::new(&mut self.max_width_cm)
-                            .range(1.0..=500.0)
-                            .speed(0.5)
-                            .suffix(" cm"),
-                    );
-                    ui.end_row();
-
-                    ui.label("🔲 Margem (cm):");
-                    ui.add(
-                        egui::DragValue::new(&mut self.margin_cm)
-                            .range(0.0..=10.0)
-                            .speed(0.05)
-                            .suffix(" cm"),
-                    );
-                    ui.end_row();
-
-                    ui.label("↔ Espaçamento (cm):");
-                    ui.add(
-                        egui::DragValue::new(&mut self.spacing_cm)
-                            .range(0.0..=10.0)
-                            .speed(0.05)
-                            .suffix(" cm"),
-                    );
-                    ui.end_row();
-
-                    ui.label("🔍 Step (mm):");
-                    ui.add(
-                        egui::DragValue::new(&mut self.step_mm)
-                            .range(0.1..=50.0)
-                            .speed(0.1)
-                            .suffix(" mm"),
-                    );
-                    ui.end_row();
-                });
-
-            // Mostra equivalência em px para referência
-            let w_px = cm_to_px(self.max_width_cm, self.dpi);
-            let m_px = cm_to_px(self.margin_cm, self.dpi);
-            let s_px = cm_to_px(self.spacing_cm, self.dpi);
-            let step_px = cm_to_px(self.step_mm / 10.0, self.dpi).max(1);
-            ui.add_space(2.0);
-            egui::CollapsingHeader::new("ℹ Equivalência em pixels").show(ui, |ui| {
-                ui.small(format!("Largura: {} px", w_px));
-                ui.small(format!("Margem:  {} px", m_px));
-                ui.small(format!("Espaço:  {} px", s_px));
-                ui.small(format!("Step:    {} px", step_px));
-            });
-            ui.separator();
-
-            ui.checkbox(&mut self.allow_rotate, "🔄 Permitir Rotação");
-            ui.separator();
-
-            // --- Algoritmo ---
-            ui.label("Algoritmo:");
-            ui.radio_value(&mut self.algorithm, Algorithm::Gallery, "Gallery (linhas)");
-            ui.radio_value(&mut self.algorithm, Algorithm::Fast,    "Fast (prateleiras)");
-            ui.radio_value(&mut self.algorithm, Algorithm::Tight,   "Tight (perfil)");
-            ui.radio_value(&mut self.algorithm, Algorithm::Masked,  "Masked (alpha)");
-
-            if self.algorithm == Algorithm::Masked {
-                ui.separator();
-                ui.label("Performance:");
-                egui::ComboBox::from_id_source("perf_combo")
-                    .selected_text(&self.performance_mode)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.performance_mode, "fast".to_string(),     "Fast");
-                        ui.selectable_value(&mut self.performance_mode, "balanced".to_string(), "Balanced");
-                        ui.selectable_value(&mut self.performance_mode, "quality".to_string(),  "Quality");
-                    });
+            
+            if ui.button("📁 Selecionar Pasta").clicked() {
+                if let Some(folder) = FileDialog::new().pick_folder() {
+                    self.folder = Some(folder.clone());
+                    self.log_lines.push((format!("Pasta selecionada: {:?}", folder), LogLevel::Info));
+                }
+            }
+            if let Some(f) = &self.folder {
+                ui.label(f.to_string_lossy());
             }
 
-            ui.separator();
+            ui.add_enabled_ui(self.folder.is_some() && !self.is_loading && !self.is_packing, |ui| {
+                if ui.button("Carregar Imagens").clicked() {
+                    self.start_loading(ctx.clone());
+                }
+            });
 
-            // --- Ação ---
-            if self.is_packing {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Empacotando...");
+            ui.separator();
+            ui.heading("Configurações");
+            egui::Grid::new("config_grid").show(ui, |ui| {
+                ui.label("Largura max (cm):");
+                ui.add(egui::DragValue::new(&mut self.max_width_cm).range(10.0..=500.0).speed(0.5));
+                ui.end_row();
+
+                ui.label("Margem (cm):");
+                ui.add(egui::DragValue::new(&mut self.margin_cm).range(0.0..=10.0).speed(0.1));
+                ui.end_row();
+
+                ui.label("Espaçamento (cm):");
+                ui.add(egui::DragValue::new(&mut self.spacing_cm).range(0.0..=10.0).speed(0.1));
+                ui.end_row();
+
+                ui.label("Step (mm):");
+                ui.add(egui::DragValue::new(&mut self.step_mm).range(1.0..=50.0).speed(0.1));
+                ui.end_row();
+
+                ui.label("Threshold Branco:");
+                ui.add(egui::DragValue::new(&mut self.threshold).range(200..=255));
+                ui.end_row();
+
+                ui.label("Saída:");
+                ui.text_edit_singleline(&mut self.output_name);
+                ui.end_row();
+            });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Algoritmo:");
+                ui.radio_value(&mut self.algorithm, Algorithm::Gallery, "Gallery");
+                ui.radio_value(&mut self.algorithm, Algorithm::Fast, "Fast");
+                ui.radio_value(&mut self.algorithm, Algorithm::Tight, "Tight");
+                ui.radio_value(&mut self.algorithm, Algorithm::Masked, "Masked");
+            });
+
+            ui.checkbox(&mut self.allow_rotate, "Permitir rotação livre");
+
+            ui.separator();
+            ui.heading("Rótulo");
+            ui.checkbox(&mut self.label_date_enabled, "Incluir Data");
+            if self.label_date_enabled {
+                ui.text_edit_singleline(&mut self.label_date);
+            }
+            ui.color_edit_button_rgba_unmultiplied(&mut self.label_color);
+            egui::ComboBox::from_label("Posição")
+                .selected_text(&self.label_position)
+                .show_ui(ui, |ui| {
+                    for pos in ["external_bottom_right", "external_bottom_left", "external_bottom_center", "overlay_bottom_right"] {
+                        ui.selectable_value(&mut self.label_position, pos.to_string(), pos);
+                    }
                 });
+
+            ui.separator();
+            
+            if self.is_loading || self.is_packing {
+                ui.spinner();
+                ui.label(&self.status_text);
             } else {
-                let can_pack = !self.image_paths.is_empty();
+                let can_pack = !self.loaded_items.is_empty();
                 ui.add_enabled_ui(can_pack, |ui| {
-                    if ui.button("▶ PACK!").clicked() {
+                    if ui.button("▶ GERAR ROLO").clicked() {
                         self.start_packing(ctx.clone());
                     }
                 });
+                ui.label(&self.status_text);
             }
-
-            ui.separator();
-
-            if self.pack_result.is_some() {
-                if ui.button("💾 Exportar PNG").clicked() {
-                    self.export();
-                }
-            }
-
-            ui.separator();
-            ui.label(&self.status_text);
         });
 
-        // --- Painel central com preview ---
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                if let Some(tex) = &self.preview_texture {
-                    ui.image(tex);
-                } else if self.is_packing {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("⏳ Processando...");
-                    });
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Carregue imagens e clique em PACK!");
-                    });
-                }
+            egui::TopBottomPanel::bottom("log_panel").resizable(true).min_height(100.0).show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                    for (msg, level) in &self.log_lines {
+                        let color = match level {
+                            LogLevel::Info => egui::Color32::WHITE,
+                            LogLevel::Warn => egui::Color32::YELLOW,
+                            LogLevel::Error => egui::Color32::RED,
+                            LogLevel::Ok => egui::Color32::GREEN,
+                            LogLevel::Muted => egui::Color32::GRAY,
+                        };
+                        ui.colored_label(color, msg);
+                    }
+                });
+            });
+
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    if let Some(tex) = &self.preview_texture {
+                        ui.image(tex);
+                        ui.label(format!("Dimensões: {} x {}", self.preview_dims.0, self.preview_dims.1));
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Nenhum preview.");
+                        });
+                    }
+                });
             });
         });
 
-        if self.is_packing {
+        if self.is_loading || self.is_packing {
             ctx.request_repaint();
         }
     }
 }
 
 impl RollPackerApp {
-    fn start_packing(&mut self, ctx: egui::Context) {
-        self.is_packing = true;
-        self.pack_result = None;
-        self.preview_texture = None;
-        self.status_text = "⏳ Empacotando...".to_string();
-
-        let paths = self.image_paths.clone();
-        let alg = self.algorithm;
-        let dpi = self.dpi;
-
-        // Converte cm → px para o engine
-        let max_width = cm_to_px(self.max_width_cm, dpi);
-        let spacing   = cm_to_px(self.spacing_cm, dpi);
-        let margin    = cm_to_px(self.margin_cm, dpi);
-        let step      = cm_to_px(self.step_mm / 10.0, dpi).max(1);
-
-        let allow_rotate = self.allow_rotate;
-        let perf_mode = self.performance_mode.clone();
-        let tx = self.tx.clone();
+    fn start_loading(&mut self, ctx: egui::Context) {
+        self.is_loading = true;
+        self.progress = 0.0;
+        self.loaded_items.clear();
+        let folder = self.folder.clone().unwrap();
+        let th = self.threshold;
+        let prod_c = self.prod_classifier.clone();
+        let qual_c = self.quality_classifier.clone();
+        let tx = self.load_tx.clone();
 
         thread::spawn(move || {
-            let mut images = Vec::new();
-            for p in &paths {
-                match image::open(p) {
-                    Ok(img) => images.push(img),
-                    Err(e) => eprintln!("Erro ao abrir {:?}: {}", p, e),
+            let cb = {
+                let tx = tx.clone();
+                let ctx = ctx.clone();
+                move |curr, total| {
+                    let _ = tx.send(LoadMsg::Progress(curr, total));
+                    ctx.request_repaint();
                 }
-            }
-
-            if images.is_empty() {
-                eprintln!("Nenhuma imagem válida carregada!");
-                return;
-            }
-
-            eprintln!(
-                "Empacotando {} imagens | {}x? px | DPI={}",
-                images.len(), max_width, dpi
-            );
-
-            let (placed_imgs, canvas_w, canvas_h) = match alg {
-                Algorithm::Gallery => pack_images_gallery(images, max_width, spacing, margin, allow_rotate),
-                Algorithm::Fast    => pack_images_fast(images, max_width, spacing, margin, allow_rotate),
-                Algorithm::Tight   => pack_images_tight(images, max_width, spacing, margin, step, allow_rotate),
-                Algorithm::Masked  => pack_images_masked(images, max_width, spacing, margin, step, allow_rotate, &perf_mode),
             };
-
-            let canvas_h_cm = px_to_cm(canvas_h, dpi);
-            eprintln!(
-                "Concluído: {} imgs → canvas {} × {} px  ({:.1} cm)",
-                placed_imgs.len(), canvas_w, canvas_h, canvas_h_cm
-            );
-
-            // Renderiza canvas final em RGBA com alpha blending correto
-            let cw = canvas_w.max(1) as usize;
-            let ch = canvas_h.max(1) as usize;
-            let mut canvas_data = vec![255u8; cw * ch * 4]; // fundo branco opaco
-
-            for pi in &placed_imgs {
-                let rgba = pi.img.to_rgba8();
-                let iw = rgba.width() as usize;
-                let ih = rgba.height() as usize;
-                let ox = pi.x as usize;
-                let oy = pi.y as usize;
-
-                for py in 0..ih {
-                    let dy = oy + py;
-                    if dy >= ch { break; }
-                    for px in 0..iw {
-                        let dx = ox + px;
-                        if dx >= cw { break; }
-                        let src = rgba.get_pixel(px as u32, py as u32);
-                        if src[3] == 0 { continue; }
-                        let idx = (dy * cw + dx) * 4;
-                        let a = src[3] as f32 / 255.0;
-                        let inv_a = 1.0 - a;
-                        canvas_data[idx]   = (src[0] as f32 * a + canvas_data[idx]   as f32 * inv_a) as u8;
-                        canvas_data[idx+1] = (src[1] as f32 * a + canvas_data[idx+1] as f32 * inv_a) as u8;
-                        canvas_data[idx+2] = (src[2] as f32 * a + canvas_data[idx+2] as f32 * inv_a) as u8;
-                        canvas_data[idx+3] = 255;
-                    }
-                }
-            }
-
-            let _ = tx.send(PackResult {
-                canvas_data,
-                canvas_w: cw as u32,
-                canvas_h: ch as u32,
-                canvas_h_cm,
-                dpi,
-            });
-
+            let _ = tx.send(LoadMsg::Log("Iniciando carregamento...".to_string(), LogLevel::Info));
+            let items = process_images(&folder, 0, th, prod_c, qual_c, cb);
+            let _ = tx.send(LoadMsg::Done(items));
             ctx.request_repaint();
         });
     }
 
-    fn export(&self) {
-        if let Some(result) = &self.pack_result {
-            let default_name = format!(
-                "rolo_{:.0}x{:.1}cm.png",
-                px_to_cm(result.canvas_w, result.dpi),
-                result.canvas_h_cm
-            );
-            if let Some(path) = FileDialog::new()
-                .add_filter("PNG", &["png"])
-                .set_file_name(&default_name)
-                .save_file()
-            {
-                let img = image::RgbaImage::from_raw(
-                    result.canvas_w,
-                    result.canvas_h,
-                    result.canvas_data.clone(),
-                );
-                if let Some(img) = img {
-                    match img.save(&path) {
-                        Ok(_) => eprintln!("✅ Salvo em {:?}", path),
-                        Err(e) => eprintln!("❌ Erro ao salvar: {}", e),
-                    }
-                }
+    fn start_packing(&mut self, ctx: egui::Context) {
+        self.is_packing = true;
+        let items = self.loaded_items.clone();
+        let tx = self.pack_tx.clone();
+        let max_w = cm_to_px(self.max_width_cm, self.dpi);
+        let spacing = cm_to_px(self.spacing_cm, self.dpi);
+        let margin = cm_to_px(self.margin_cm, self.dpi);
+        let step = cm_to_px(self.step_mm / 10.0, self.dpi).max(1);
+        let alg = self.algorithm;
+        let allow_rotate = self.allow_rotate;
+        let perf = self.performance_mode.clone();
+        
+        let label_pos = self.label_position.clone();
+        let label_date = if self.label_date_enabled { self.label_date.clone() } else { "".to_string() };
+        let mut color_u8 = [0u8; 4];
+        for i in 0..4 { color_u8[i] = (self.label_color[i] * 255.0) as u8; }
+
+        let out_dir = self.folder.clone().unwrap();
+        let out_name = self.output_name.clone();
+
+        thread::spawn(move || {
+            let _ = tx.send(PackMsg::Log("Preparando rótulos...".to_string(), LogLevel::Info));
+            
+            // Add labels
+            let mut final_images = Vec::new();
+            for item in items {
+                let text = format!("{}\n{}\n{}", item.name, item.category, item.quality);
+                let dyn_img = DynamicImage::ImageRgba8(item.image);
+                let labeled = add_label_to_image(dyn_img, &text, &label_pos, &label_date, color_u8);
+                final_images.push(labeled);
             }
-        }
+
+            let _ = tx.send(PackMsg::Log("Executando empacotamento...".to_string(), LogLevel::Info));
+
+            let (placed, cw, ch) = match alg {
+                Algorithm::Gallery => pack_images_gallery(final_images, max_w, spacing, margin, allow_rotate),
+                Algorithm::Fast => pack_images_fast(final_images, max_w, spacing, margin, allow_rotate),
+                Algorithm::Tight => pack_images_tight(final_images, max_w, spacing, margin, step, allow_rotate),
+                Algorithm::Masked => pack_images_masked(final_images, max_w, spacing, margin, step, allow_rotate, &perf),
+            };
+
+            let _ = tx.send(PackMsg::Log(format!("Rolo gerado com {} imagens. Renderizando canvas...", placed.len()), LogLevel::Info));
+
+            let canvas = build_canvas(&placed, cw, ch);
+
+            let _ = tx.send(PackMsg::Log("Salvando JPEG...".to_string(), LogLevel::Info));
+
+            let out_path = out_dir.join(out_name);
+            let paths = match split_and_save(&canvas, &out_path, 65000, 90) {
+                Ok(p) => {
+                    let _ = tx.send(PackMsg::Log("JPEG salvo com sucesso.".to_string(), LogLevel::Ok));
+                    p
+                },
+                Err(e) => {
+                    let _ = tx.send(PackMsg::Error(format!("Falha ao salvar: {}", e)));
+                    Vec::new()
+                }
+            };
+
+            // Prepare preview downscaled
+            let scale = if cw > 1200 { 1200.0 / cw as f32 } else { 1.0 };
+            let pw = (cw as f32 * scale) as u32;
+            let ph = (ch as f32 * scale) as u32;
+            let preview = image::imageops::resize(&canvas, pw, ph, image::imageops::FilterType::Lanczos3);
+            
+            let mut rgba_data = Vec::new();
+            rgba_data.extend_from_slice(preview.as_raw());
+
+            let _ = tx.send(PackMsg::Done(PackResult {
+                paths,
+                canvas_w: cw,
+                canvas_h: ch,
+                preview_w: pw,
+                preview_h: ph,
+                preview_rgba: rgba_data,
+            }));
+
+            ctx.request_repaint();
+        });
     }
 }

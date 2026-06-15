@@ -38,6 +38,8 @@ class RollerPackRequest:
     output_name: str
     performance_mode: str
     label_position: str
+    label_date: str = ""                          # Data de envio (opcional)
+    label_text_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # Cor do texto RGBA
 
 
 @dataclass(slots=True)
@@ -96,13 +98,21 @@ def run_roll_packer(
         debug_fn(image_items, profile["debug_limit"])
 
     # Aplicar rótulos dinâmicos de categoria nas imagens limpas antes de passar para o packer
-    images = []
-    for item in image_items:
-        clean_img = item["image"]
-        category = item.get("category", "N/A")
-        # Desenha a etiqueta da categoria
-        labeled_img = add_label_to_image(clean_img, category, position=request.label_position)
-        images.append(labeled_img)
+    from concurrent.futures import ThreadPoolExecutor
+    from functools import partial
+
+    _label_fn = partial(
+        add_label_to_image,
+        position=request.label_position,
+        date_str=request.label_date,
+        text_color=request.label_text_color,
+    )
+    worker_count = min(len(image_items), profile["max_workers"])
+    with ThreadPoolExecutor(max_workers=worker_count) as ex:
+        images = list(ex.map(
+            lambda it: _label_fn(it["image"], it.get("category", "N/A")),
+            image_items
+        ))
 
     status_fn("Calculando layout...")
 

@@ -1,5 +1,5 @@
 use image::DynamicImage;
-use std::cmp::{max, min};
+use std::cmp::max;
 use super::image_ops::{trim_empty_borders, Mask};
 use super::packing::PlacedImage;
 
@@ -107,9 +107,10 @@ pub fn pack_images_masked(
                     'outer: for my in 0..h {
                         let oy = fy + my;
                         let occ_row_idx = oy * max_width_u;
-                        let mask_row_idx = my * w;
-                        for mx in 0..w {
-                            if mask.data[mask_row_idx + mx] && occupancy[occ_row_idx + fx + mx] {
+                        for span in &mask.spans[my] {
+                            let start = occ_row_idx + fx + span.start as usize;
+                            let end = occ_row_idx + fx + span.end as usize;
+                            if occupancy[start..end].iter().any(|&b| b) {
                                 collides = true;
                                 break 'outer;
                             }
@@ -136,7 +137,7 @@ pub fn pack_images_masked(
                         }
                     }
                 }
-                if found_at_fy && variant_best.as_ref().unwrap().1.4 < max_y_used {
+                if found_at_fy && variant_best.as_ref().unwrap().1.0 == 0 {
                     break;
                 }
             }
@@ -157,7 +158,6 @@ pub fn pack_images_masked(
         // Nudge gravity — limitado para não ser O(h × w × distancia)
         let mut x = final_pos.0;
         let mut y = final_pos.1;
-        let w = var.mask.width;
         let h = var.mask.height;
         
         // Nudge UP: max step * 4 iterações para evitar loop longo
@@ -167,9 +167,13 @@ pub fn pack_images_masked(
             let ty = y - 1;
             let mut col = false;
             'nu: for my in 0..h {
-                for mx in 0..w {
-                    if var.mask.data[my * w + mx] && occupancy[(ty + my) * max_width_u + x + mx] {
-                        col = true; break 'nu;
+                let occ_row_idx = (ty + my) * max_width_u;
+                for span in &var.mask.spans[my] {
+                    let start = occ_row_idx + x + span.start as usize;
+                    let end = occ_row_idx + x + span.end as usize;
+                    if occupancy[start..end].iter().any(|&b| b) {
+                        col = true;
+                        break 'nu;
                     }
                 }
             }
@@ -182,9 +186,13 @@ pub fn pack_images_masked(
             let tx = x - 1;
             let mut col = false;
             'nl: for my in 0..h {
-                for mx in 0..w {
-                    if var.mask.data[my * w + mx] && occupancy[(y + my) * max_width_u + tx + mx] {
-                        col = true; break 'nl;
+                let occ_row_idx = (y + my) * max_width_u;
+                for span in &var.mask.spans[my] {
+                    let start = occ_row_idx + tx + span.start as usize;
+                    let end = occ_row_idx + tx + span.end as usize;
+                    if occupancy[start..end].iter().any(|&b| b) {
+                        col = true;
+                        break 'nl;
                     }
                 }
             }
@@ -193,30 +201,41 @@ pub fn pack_images_masked(
         }
 
         // Stamp: dilatação circular baseada em máscara
-        let spacing_sq = (spacing_u * spacing_u) as isize;
-        for my in 0..h {
-            for mx in 0..w {
-                if var.mask.data[my * w + mx] {
-                    let px_x = (x + mx) as isize;
-                    let px_y = (y + my) as isize;
-                    
-                    let dy_start = max(margin_u as isize, px_y - spacing_u as isize);
-                    let dy_end = min(occ_height as isize, px_y + spacing_u as isize + 1);
-                    
-                    let dx_start = max(margin_u as isize, px_x - spacing_u as isize);
-                    let dx_end = min((max_width_u - margin_u) as isize, px_x + spacing_u as isize + 1);
-                    
-                    for dy in dy_start..dy_end {
-                        let row_idx = dy as usize * max_width_u;
-                        let dist_y = dy - px_y;
-                        let dist_y_sq = dist_y * dist_y;
-                        
-                        for dx in dx_start..dx_end {
-                            let dist_x = dx - px_x;
-                            if dist_x * dist_x + dist_y_sq <= spacing_sq {
-                                occupancy[row_idx + dx as usize] = true;
-                            }
+        if spacing_u > 0 {
+            let mut dx_limits = Vec::with_capacity(spacing_u + 1);
+            for dy in 0..=spacing_u {
+                let limit = ((spacing_u * spacing_u - dy * dy) as f64).sqrt() as usize;
+                dx_limits.push(limit);
+            }
+            
+            for my in 0..h {
+                for span in &var.mask.spans[my] {
+                    for dy_offset in -(spacing_u as isize)..=(spacing_u as isize) {
+                        let oy = (y as isize + my as isize + dy_offset) as usize;
+                        if oy < margin_u || oy >= occ_height {
+                            continue;
                         }
+                        let dy_abs = dy_offset.abs() as usize;
+                        let dx_limit = dx_limits[dy_abs];
+                        
+                        let start_x = (x as isize + span.start as isize - dx_limit as isize).max(margin_u as isize) as usize;
+                        let end_x = (x as isize + span.end as isize + dx_limit as isize).min((max_width_u - margin_u) as isize) as usize;
+                        
+                        if start_x < end_x {
+                            let row_idx = oy * max_width_u;
+                            occupancy[row_idx + start_x..row_idx + end_x].fill(true);
+                        }
+                    }
+                }
+            }
+        } else {
+            for my in 0..h {
+                let row_idx = (y + my) * max_width_u;
+                for span in &var.mask.spans[my] {
+                    let start_x = (x + span.start as usize).max(margin_u);
+                    let end_x = (x + span.end as usize).min(max_width_u - margin_u);
+                    if start_x < end_x {
+                        occupancy[row_idx + start_x..row_idx + end_x].fill(true);
                     }
                 }
             }
