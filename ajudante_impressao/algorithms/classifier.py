@@ -269,3 +269,66 @@ def get_quality_classifier():
 # Para manter compatibilidade com código existente
 def get_classifier():
     return get_prod_classifier()
+
+
+def feed_back_to_training(
+    folder: Path | str,
+    filename: str,
+    threshold: int,
+    category: Optional[str] = None,
+    quality: Optional[str] = None,
+):
+    """Copia a imagem limpa e cortada do cache para a pasta de treinamentos com a categoria/qualidade corrigida."""
+    import shutil
+    from .image_ops import _get_cache_key
+    
+    file_path = Path(folder) / filename
+    if not file_path.exists():
+        return
+        
+    try:
+        key = _get_cache_key(file_path, threshold)
+        cache_dir = Path(folder) / ".ajudante_cache"
+        cache_png = cache_dir / f"{key}.png"
+        if not cache_png.exists():
+            return
+            
+        # 1. Producao feedback
+        if category and category not in ("N/A", "Erro", "Sem dados"):
+            prod_cls = get_prod_classifier()
+            dest_dir = prod_cls.training_dir / category
+            if dest_dir.parent.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Remove from other folders to avoid duplicates
+                for other_cat in prod_cls.category_names:
+                    if other_cat != category:
+                        for ext in (".png", ".jpg", ".jpeg"):
+                            old_file = prod_cls.training_dir / other_cat / f"{file_path.stem}{ext}"
+                            if old_file.exists():
+                                old_file.unlink()
+                            
+                dest_file = dest_dir / f"{file_path.stem}.png"
+                shutil.copy2(cache_png, dest_file)
+                print(f"[Classifier] Realimentado em Produção/{category}: {dest_file.name}")
+                
+        # 2. Qualidade feedback
+        if quality and quality not in ("N/A", "Erro", "Sem dados"):
+            qual_cls = get_quality_classifier()
+            dest_dir = qual_cls.training_dir / quality
+            if dest_dir.parent.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                
+                for other_qual in qual_cls.category_names:
+                    if other_qual != quality:
+                        for ext in (".png", ".jpg", ".jpeg"):
+                            old_file = qual_cls.training_dir / other_qual / f"{file_path.stem}{ext}"
+                            if old_file.exists():
+                                old_file.unlink()
+                            
+                dest_file = dest_dir / f"{file_path.stem}.png"
+                shutil.copy2(cache_png, dest_file)
+                print(f"[Classifier] Realimentado em Qualidade/{quality}: {dest_file.name}")
+                
+    except Exception as e:
+        print(f"[Classifier] Erro ao realimentar treino: {e}")

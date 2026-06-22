@@ -805,9 +805,11 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
                     target_item["category"] = text
                     try:
                         from ...algorithms.image_ops import update_image_cache_meta
+                        from ...algorithms.classifier import feed_back_to_training
                         thresh = int(self.threshold_input.text())
                         if self._folder:
                             update_image_cache_meta(self._folder, target_item["name"], thresh, {"category": text})
+                            feed_back_to_training(self._folder, target_item["name"], thresh, category=text)
                     except Exception:
                         pass
                 return on_change
