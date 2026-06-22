@@ -3,167 +3,241 @@ from __future__ import annotations
 
 THEMES = {
     "dark": {
-        "bg": "#0F1117",
-        "card": "#1A1D27",
-        "card_alt": "#12151F",
-        "panel": "#0D1520",
-        "border": "#2C3242",
-        "text": "#E8EAF0",
-        "muted": "#5A5F72",
-        "accent": "#00C2A8",
-        "accent_hover": "#009E88",
+        "bg": "#0D0E10",         # Fundo principal ultra limpo
+        "card": "#15171A",       # Fundo dos blocos principais (quase invisível contraste)
+        "card_alt": "#1D2024",   # Fundo de campos/botões (ligeiramente mais claro)
+        "panel": "#15171A",      # Painéis laterais
+        "border": "transparent", # Sem bordas visíveis, focando em padding
+        "text": "#F3F4F6",       # Texto branco suave
+        "muted": "#9CA3AF",      # Cinza legível para labels secundárias
+        "accent": "#3B82F6",     # Azul moderno de destaque (Blue 500 do Tailwind)
+        "accent_hover": "#2563EB",
+        "danger": "#EF4444",
     },
     "light": {
-        "bg": "#F4F6FA",
+        "bg": "#F9FAFB",
         "card": "#FFFFFF",
-        "card_alt": "#E9EEF5",
-        "panel": "#DCE3EE",
-        "border": "#CAD3E0",
+        "card_alt": "#F3F4F6",
+        "panel": "#FFFFFF",
+        "border": "transparent",
         "text": "#111827",
         "muted": "#6B7280",
-        "accent": "#00A892",
-        "accent_hover": "#008A78",
+        "accent": "#2563EB",
+        "accent_hover": "#1D4ED8",
+        "danger": "#EF4444",
     },
 }
 
 
 def build_stylesheet(theme_name: str) -> str:
     colors = THEMES.get(theme_name, THEMES["dark"])
+    
     return f"""
+    * {{
+        font-family: "Inter", "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+    }}
+    
     QMainWindow, QWidget {{
         background: {colors['bg']};
         color: {colors['text']};
     }}
-    QFrame#card, QGroupBox, QTabWidget::pane, QPlainTextEdit, QListWidget, QScrollArea, QComboBox, QLineEdit {{
+    
+    /* Remoção de bordas nas estruturas principais */
+    QFrame#card, QGroupBox, QTabWidget::pane, QPlainTextEdit, QListWidget, QScrollArea {{
         background: {colors['card']};
-        border: 1px solid {colors['border']};
-        border-radius: 10px;
+        border: none;
+        border-radius: 8px;
     }}
+    
     QFrame#panel {{
         background: {colors['panel']};
-        border: 1px solid {colors['border']};
-        border-radius: 10px;
+        border: none;
+        border-radius: 8px;
     }}
+    
+    /* Tipografia Limpa */
     QLabel#title {{
-        color: {colors['accent']};
-        font-size: 26px;
-        font-weight: 700;
+        color: {colors['text']};
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: -0.5px;
     }}
-    QLabel#subtitle, QLabel#section, QLabel#muted {{
+    
+    QLabel#subtitle {{
         color: {colors['muted']};
+        font-size: 13px;
+        font-weight: 400;
     }}
+    
     QLabel#section {{
-        font-size: 14px;
+        color: {colors['text']};
+        font-size: 13px;
         font-weight: 700;
-        letter-spacing: 1px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding-top: 8px;
+        padding-bottom: 4px;
     }}
+    
     QLabel#fieldLabel {{
         color: {colors['muted']};
         font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-        text-transform: uppercase;
+        font-weight: 600;
         background: transparent;
         border: none;
         padding: 0;
     }}
-    QFrame#fieldCard {{
-        background: {colors['card_alt']};
-        border: 1px solid {colors['border']};
-        border-radius: 10px;
+    
+    QLabel#muted {{
+        color: {colors['muted']};
     }}
+    
+    /* Inputs minimalistas */
+    QFrame#fieldCard {{
+        background: {colors['card']};
+        border: none;
+        border-radius: 6px;
+    }}
+    
     QLineEdit, QPlainTextEdit, QListWidget, QComboBox {{
         background: {colors['card_alt']};
-        border: 1px solid {colors['border']};
-        border-radius: 8px;
-        padding: 8px;
+        border: 2px solid transparent; /* Reserva espaço para o outline de foco */
+        border-radius: 6px;
+        padding: 8px 12px;
         color: {colors['text']};
         selection-background-color: {colors['accent']};
     }}
+    
     QLineEdit#fieldInput {{
-        background: {colors['card']};
-        border: 1px solid {colors['border']};
-        border-radius: 8px;
-        min-height: 34px;
-        padding: 6px 10px;
+        background: {colors['card_alt']};
+        border-radius: 6px;
+        min-height: 38px;
+        padding: 8px 12px;
         color: {colors['text']};
-        font-size: 16px;
-        font-weight: 600;
+        font-size: 14px;
+        font-weight: 500;
     }}
-    QLineEdit#fieldInput:focus {{
-        border-color: {colors['accent']};
+    
+    QLineEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QComboBox:focus {{
+        border: 2px solid {colors['accent']};
+        background: {colors['card']};
     }}
-    QLineEdit#fieldInput[invalid="true"] {{
-        color: #FF6B6B;
+    
+    QLineEdit[invalid="true"] {{
+        border: 2px solid {colors['danger']};
     }}
+    
     QLineEdit::placeholder {{
         color: {colors['muted']};
     }}
+    
+    /* Botões Flat */
     QPushButton {{
         background: {colors['card_alt']};
-        border: 1px solid {colors['border']};
-        border-radius: 8px;
-        padding: 10px 14px;
+        border: none;
+        border-radius: 6px;
+        padding: 12px 16px;
         color: {colors['text']};
+        font-size: 13px;
         font-weight: 600;
     }}
+    
     QPushButton:hover {{
-        border-color: {colors['accent']};
+        background: {colors['muted']};
+        color: {colors['card']};
     }}
+    
     QPushButton#accent {{
         background: {colors['accent']};
-        color: #041311;
-        border: none;
+        color: #FFFFFF;
     }}
+    
     QPushButton#accent:hover {{
         background: {colors['accent_hover']};
     }}
-    QLineEdit:focus, QPlainTextEdit:focus, QListWidget:focus, QComboBox:focus {{
-        border: 1px solid {colors['accent']};
+    
+    QPushButton:disabled {{
+        background: {colors['card']};
+        color: {colors['muted']};
+        opacity: 0.5;
     }}
+    
+    /* Checkboxes e Radios clean */
     QRadioButton, QCheckBox {{
-        spacing: 8px;
+        spacing: 10px;
+        font-size: 13px;
+        color: {colors['text']};
     }}
+    
     QRadioButton::indicator, QCheckBox::indicator {{
-        width: 16px;
-        height: 16px;
-    }}
-    QRadioButton::indicator {{
-        border-radius: 8px;
-        border: 1px solid {colors['muted']};
+        width: 18px;
+        height: 18px;
         background: {colors['card_alt']};
+        border: none;
     }}
+    
+    QRadioButton::indicator {{
+        border-radius: 9px;
+    }}
+    
     QRadioButton::indicator:checked, QCheckBox::indicator:checked {{
         background: {colors['accent']};
-        border: 1px solid {colors['accent']};
     }}
+    
     QCheckBox::indicator {{
         border-radius: 4px;
-        border: 1px solid {colors['muted']};
-        background: {colors['card_alt']};
     }}
+    
+    /* Abas limpas */
     QTabBar::tab {{
-        background: {colors['card_alt']};
+        background: transparent;
         color: {colors['muted']};
-        padding: 10px 14px;
-        border-top-left-radius: 8px;
-        border-top-right-radius: 8px;
+        padding: 12px 20px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        font-size: 13px;
+        font-weight: 600;
         margin-right: 4px;
     }}
+    
     QTabBar::tab:selected {{
-        background: {colors['accent']};
-        color: #041311;
+        color: {colors['accent']};
+        border-bottom: 2px solid {colors['accent']};
     }}
+    
+    QTabBar::tab:hover:!selected {{
+        color: {colors['text']};
+        border-bottom: 2px solid {colors['card_alt']};
+    }}
+    
+    /* Barra de progresso lisa */
     QProgressBar {{
-        border: 1px solid {colors['border']};
-        border-radius: 6px;
         background: {colors['card_alt']};
-        min-height: 14px;
-        max-height: 14px;
+        border: none;
+        border-radius: 4px;
+        min-height: 8px;
+        max-height: 8px;
         text-align: center;
     }}
+    
     QProgressBar::chunk {{
         background: {colors['accent']};
-        border-radius: 5px;
+        border-radius: 4px;
+    }}
+    
+    /* Scrollbars elegantes */
+    QScrollBar:vertical {{
+        border: none;
+        background: transparent;
+        width: 8px;
+        margin: 0px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {colors['card_alt']};
+        min-height: 20px;
+        border-radius: 4px;
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0px;
     }}
     """

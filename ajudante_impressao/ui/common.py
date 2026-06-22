@@ -44,7 +44,6 @@ class ScreenScaffold:
 
         title = QLabel(title_text)
         title.setObjectName("title")
-        title.setFont(QFont("Courier New", 16, QFont.Weight.Bold))
 
         subtitle = QLabel(subtitle_text)
         subtitle.setObjectName("subtitle")
@@ -57,13 +56,11 @@ class ScreenScaffold:
     def section_label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setObjectName("section")
-        label.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
         return label
 
     def field_label(self, text: str) -> QLabel:
         label = QLabel(text)
         label.setObjectName("fieldLabel")
-        label.setFont(QFont("Courier New", 10))
         return label
 
     def add_field_card(
@@ -119,5 +116,5 @@ class ScreenScaffold:
     def build_log_output(self) -> QPlainTextEdit:
         output = QPlainTextEdit()
         output.setReadOnly(True)
-        output.setFont(QFont("Courier New", 10))
+        output.setFont(QFont("Consolas", 11))
         return output

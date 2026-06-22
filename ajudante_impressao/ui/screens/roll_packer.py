@@ -145,7 +145,6 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.folder_label = QLabel("Nenhuma pasta selecionada")
         self.folder_label.setWordWrap(True)
         self.folder_label.setObjectName("muted")
-        self.folder_label.setFont(QFont("Courier New", 10))
         layout.addWidget(self.folder_label)
 
         pick_button = QPushButton("Selecionar Pasta")
@@ -156,6 +155,11 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.load_button.clicked.connect(self._load_images)
         self.load_button.setEnabled(False)
         layout.addWidget(self.load_button)
+
+        self.clear_cache_button = QPushButton("Limpar Cache")
+        self.clear_cache_button.clicked.connect(self._clear_cache)
+        self.clear_cache_button.setEnabled(False)
+        layout.addWidget(self.clear_cache_button)
 
         layout.addWidget(self.section_label("CONFIGURACOES"))
         config_box = QGroupBox()
@@ -186,21 +190,6 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             self.performance_radios[value] = radio
             config_layout.addWidget(radio)
 
-        config_layout.addWidget(self.field_label("Modo de encaixe"))
-        self.mode_group = QButtonGroup(self)
-        self.mode_radios = {}
-        for text, value in (
-            ("Mosaico por linhas", "gallery"),
-            ("Rapido - Linhas inteligentes", "fast"),
-            ("Compacto - Skyline", "tight"),
-            ("Poligonal - Mascara alfa", "masked"),
-        ):
-            radio = QRadioButton(text)
-            if value == "fast":
-                radio.setChecked(True)
-            self.mode_group.addButton(radio)
-            self.mode_radios[value] = radio
-            config_layout.addWidget(radio)
 
         self.rotate_checkbox = QCheckBox("Permitir rotacao automatica")
         config_layout.addWidget(self.rotate_checkbox)
@@ -277,7 +266,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         layout.setSpacing(10)
 
         status_card, self.status_label, self.progress = self.build_status_panel("Aguardando...")
-        self.status_label.setFont(QFont("Courier New", 11))
+        self.status_label.setObjectName("muted")
         layout.addWidget(status_card)
 
         self.tabs = QTabWidget()
@@ -365,6 +354,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.folder_label.setText(f".../{self._folder.name}")
         self._append_log(f"📂  Pasta selecionada:\n    {selected}\n", "info")
         self.load_button.setEnabled(True)
+        self.clear_cache_button.setEnabled(True)
         self._loaded_image_items = []
 
     def _load_images(self) -> None:
@@ -414,6 +404,33 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._worker.failed.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
         self._worker_thread.start()
+
+    def _clear_cache(self) -> None:
+        if self._folder is None:
+            return
+        cache_dir = self._folder / ".ajudante_cache"
+        if not cache_dir.exists():
+            QMessageBox.information(self, "Limpeza de Cache", "Não há nenhum cache salvo para esta pasta.")
+            return
+            
+        reply = QMessageBox.question(
+            self, "Confirmar Limpeza",
+            "Deseja realmente excluir todos os arquivos de cache desta pasta?\n"
+            "As imagens precisarão ser processadas novamente na próxima execução.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                import shutil
+                shutil.rmtree(cache_dir)
+                self._append_log("⚡ Cache da pasta limpo com sucesso!\n", "ok")
+                self.debug_list.clear()
+                self._loaded_image_items = []
+                self.clear_cache_button.setEnabled(False)
+                QMessageBox.information(self, "Sucesso", "O cache desta pasta foi excluído.")
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Falha ao limpar o cache: {e}")
 
     def _handle_loading_finished(self, image_items: list[dict] | None) -> None:
         self._set_running(False)
@@ -470,7 +487,6 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             threshold=threshold,
             step_px=step,
             allow_rotate=self.rotate_checkbox.isChecked(),
-            packing_mode=self._selected_value(self.mode_radios),
             row_height_cm=row_height_cm,
             output_name=output_name,
             performance_mode=self._selected_value(self.performance_radios),
@@ -596,10 +612,143 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
 
             card_layout.addWidget(name_lbl)
 
-            dim_lbl = QLabel(f"{item['width_cm']:.1f} × {item['height_cm']:.1f} cm")
-            dim_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dim_lbl.setStyleSheet("border: none; background: transparent; color: #A6ADC8; font-size: 11px;")
-            card_layout.addWidget(dim_lbl)
+            # Inputs interativos para alterar a medida (mantendo proporção)
+            dim_container = QWidget()
+            dim_container.setStyleSheet("border: none; background: transparent;")
+            dim_layout = QHBoxLayout(dim_container)
+            dim_layout.setContentsMargins(0, 0, 0, 0)
+            dim_layout.setSpacing(4)
+            dim_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            w_input = QLineEdit(f"{item['width_cm']:.1f}")
+            h_input = QLineEdit(f"{item['height_cm']:.1f}")
+            w_input.setFixedWidth(54)
+            h_input.setFixedWidth(54)
+            w_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            h_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            
+            input_style = (
+                "QLineEdit {"
+                "    background: #313244;"
+                "    color: #CDD6F4;"
+                "    border: 1px solid rgba(255, 255, 255, 0.1);"
+                "    border-radius: 4px;"
+                "    font-size: 11px;"
+                "    padding: 2px;"
+                "}"
+                "QLineEdit:focus {"
+                "    border: 1px solid #3B82F6;"
+                "}"
+            )
+            w_input.setStyleSheet(input_style)
+            h_input.setStyleSheet(input_style)
+
+            times_lbl = QLabel("×")
+            times_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px; border: none; background: transparent;")
+            cm_lbl = QLabel("cm")
+            cm_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px; border: none; background: transparent;")
+
+            dim_layout.addWidget(w_input)
+            dim_layout.addWidget(times_lbl)
+            dim_layout.addWidget(h_input)
+            dim_layout.addWidget(cm_lbl)
+            card_layout.addWidget(dim_container)
+
+            # Lógica de alteração mantendo proporção original
+            aspect_ratio = item["height_cm"] / item["width_cm"] if item["width_cm"] > 0 else 1.0
+            if "original_image" not in item:
+                item["original_image"] = item["image"].copy()
+
+            # Evita recursão infinita
+            is_updating = False
+
+            def make_w_handler(w_edit=w_input, h_edit=h_input, target_item=item):
+                def on_w_change():
+                    nonlocal is_updating
+                    if is_updating:
+                        return
+                    try:
+                        val_str = w_edit.text().replace(",", ".").strip()
+                        if not val_str:
+                            return
+                        val = float(val_str)
+                        if val <= 0:
+                            return
+                        is_updating = True
+                        new_h = val * aspect_ratio
+                        h_edit.setText(f"{new_h:.1f}")
+                        
+                        # Atualiza imagem e metadados no item
+                        target_item["width_cm"] = val
+                        target_item["height_cm"] = new_h
+                        
+                        from ...algorithms.image_ops import cm_to_px, update_image_cache_meta
+                        new_w_px = cm_to_px(val)
+                        new_h_px = cm_to_px(new_h)
+                        target_item["image"] = target_item["original_image"].resize((new_w_px, new_h_px), Image.Resampling.LANCZOS)
+                        target_item["width_px"] = new_w_px
+                        target_item["height_px"] = new_h_px
+                        
+                        # Salva no cache
+                        thresh = int(self.threshold_input.text())
+                        if self._folder:
+                            update_image_cache_meta(self._folder, target_item["name"], thresh, {
+                                "width_cm": val,
+                                "height_cm": new_h,
+                                "width_px": new_w_px,
+                                "height_px": new_h_px
+                            })
+                    except ValueError:
+                        pass
+                    finally:
+                        is_updating = False
+                return on_w_change
+
+            def make_h_handler(w_edit=w_input, h_edit=h_input, target_item=item):
+                def on_h_change():
+                    nonlocal is_updating
+                    if is_updating:
+                        return
+                    try:
+                        val_str = h_edit.text().replace(",", ".").strip()
+                        if not val_str:
+                            return
+                        val = float(val_str)
+                        if val <= 0:
+                            return
+                        is_updating = True
+                        new_w = val / aspect_ratio
+                        w_edit.setText(f"{new_w:.1f}")
+                        
+                        # Atualiza imagem e metadados no item
+                        target_item["width_cm"] = new_w
+                        target_item["height_cm"] = val
+                        
+                        from ...algorithms.image_ops import cm_to_px, update_image_cache_meta
+                        new_w_px = cm_to_px(new_w)
+                        new_h_px = cm_to_px(val)
+                        target_item["image"] = target_item["original_image"].resize((new_w_px, new_h_px), Image.Resampling.LANCZOS)
+                        target_item["width_px"] = new_w_px
+                        target_item["height_px"] = new_h_px
+                        
+                        # Salva no cache
+                        thresh = int(self.threshold_input.text())
+                        if self._folder:
+                            update_image_cache_meta(self._folder, target_item["name"], thresh, {
+                                "width_cm": new_w,
+                                "height_cm": val,
+                                "width_px": new_w_px,
+                                "height_px": new_h_px
+                            })
+                    except ValueError:
+                        pass
+                    finally:
+                        is_updating = False
+                return on_h_change
+
+            # Dispara a mudança apenas ao sair do campo ou pressionar Enter (evita lentidão ao digitar)
+            w_input.editingFinished.connect(make_w_handler())
+            h_input.editingFinished.connect(make_h_handler())
 
             # Informações de Inteligência (Tipo e Qualidade)
             info_layout = QHBoxLayout()
@@ -654,6 +803,13 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             def make_change_handler(target_item=item):
                 def on_change(text):
                     target_item["category"] = text
+                    try:
+                        from ...algorithms.image_ops import update_image_cache_meta
+                        thresh = int(self.threshold_input.text())
+                        if self._folder:
+                            update_image_cache_meta(self._folder, target_item["name"], thresh, {"category": text})
+                    except Exception:
+                        pass
                 return on_change
                 
             cat_combo.currentTextChanged.connect(make_change_handler(item))

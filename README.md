@@ -89,8 +89,7 @@ Ja foi concluido:
 - separacao entre interface, servicos e algoritmos
 - remocao de modulos que desviavam do fluxo principal
 - consolidacao da base Qt em uma estrutura mais organizada
-- preparacao inicial para futura aceleracao em Rust
-- documentacao de roadmap e migracao tecnica
+- documentacao de roadmap
 
 ## O que ainda vai ser feito
 
@@ -100,14 +99,11 @@ As proximas etapas mais importantes sao:
 - melhorar a consistencia da experiencia de uso
 - adicionar benchmark dos algoritmos pesados
 - validar gargalos reais com casos da operacao
-- migrar pontos criticos de performance para Rust
-- criar fallback seguro entre implementacao Python e nativa
 - evoluir logs, previsibilidade e organizacao do fluxo
 
 Documentacao futura:
 
 - [docs/roadmap.md](./docs/roadmap.md)
-- [docs/rust-migration.md](./docs/rust-migration.md)
 
 ## Filosofia
 
@@ -125,9 +121,7 @@ O operador precisa entender o que foi feito e confiar na saida.
 
 ### 3. Performance orientada a gargalo
 
-Nem tudo precisa sair do Python.
-O que nao e gargalo fica em Python.
-O que pesa de verdade pode ir para Rust.
+O processamento pesado de imagens e geometria usa aceleração matemática (Numba/NumPy) em Python.
 
 ### 4. Estrutura antes de expansao
 
@@ -153,12 +147,6 @@ A forma correta de melhorar o sistema e:
 - `numpy`
 - `uv`
 
-### Stack futura de aceleracao
-
-- `Rust`
-- `PyO3`
-- `maturin`
-
 ## Arquitetura
 
 O projeto esta organizado para separar interface, regra de aplicacao e algoritmos.
@@ -173,8 +161,6 @@ O projeto esta organizado para separar interface, regra de aplicacao e algoritmo
   Fluxos de aplicacao e orquestracao dos modulos.
 - [`ajudante_impressao/algorithms/`](./ajudante_impressao/algorithms)
   Processamento de imagem, packing e corte.
-- [`native/packer_rs/`](./native/packer_rs)
-  Base inicial do modulo Rust para performance futura.
 
 ## Como rodar
 
@@ -208,7 +194,6 @@ python -m py_compile main.py pyside_main.py pyside_theme.py pyside_rolo_packer.p
 
 - [docs/packing-algorithm.md](./docs/packing-algorithm.md)
 - [docs/roadmap.md](./docs/roadmap.md)
-- [docs/rust-migration.md](./docs/rust-migration.md)
 
 ## Direcao do projeto
 
@@ -218,6 +203,5 @@ O objetivo de longo prazo e ter uma aplicacao que:
 - reduza o tempo de pre-producao
 - gere saidas mais consistentes
 - escale melhor com volume
-- use Rust apenas onde isso realmente trouxer ganho
 
 Em resumo: menos clique, menos retrabalho, mais previsibilidade.

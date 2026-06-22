@@ -32,7 +32,7 @@ Consolidar a estrutura atual como base oficial do projeto.
 
 ### Meta
 
-Medir o custo real dos algoritmos antes de portar qualquer parte para Rust.
+Medir o custo real dos algoritmos.
 
 ### Acoes
 
@@ -51,92 +51,19 @@ Medir o custo real dos algoritmos antes de portar qualquer parte para Rust.
    - altura final do layout
    - quantidade de imagens posicionadas
 
-## Fase 3: Contratos para Motor Nativo
+## Fase 3: Refinamento Algorítmico
 
 ### Meta
 
-Preparar interfaces simples entre Python e um futuro modulo Rust.
+Otimizar os algoritmos de encaixe puramente em Python.
 
 ### Acoes
 
-1. Definir entradas nativas em formatos simples:
-   - largura e altura
-   - mascara alfa
-   - margem
-   - espacamento
-   - step
-2. Definir saida padronizada:
-   - lista de posicionamentos
-   - largura final
-   - altura final
-3. Isolar conversoes entre `Pillow` e estruturas de dados puras.
+1. Refinar a busca multi-escala em `pack_images_masked`.
+2. Remover cálculos redundantes de colisão.
+3. Explorar novas estratégias de empacotamento baseadas em perfis otimizados.
 
-## Fase 4: Portar Nucleo Pesado para Rust
-
-### Meta
-
-Mover primeiro apenas os algoritmos de maior retorno.
-
-### Prioridade 1
-
-- `pack_images_masked`
-- `_prepare_mask_variants`
-- `_ensure_height`
-- `_collides`
-- `_stamp_reserved`
-- `_score_candidate`
-
-### Prioridade 2
-
-- `pack_images_tight`
-
-### Prioridade 3
-
-- `remove_white`
-
-### Diretriz
-
-Manter interface, carga de arquivos, preview e regras de aplicacao em Python.
-Levar para Rust apenas o miolo computacional.
-
-## Fase 5: Integracao com Python
-
-### Meta
-
-Conectar Rust sem desmontar a base atual.
-
-### Stack sugerida
-
-- `Rust`
-- `PyO3`
-- `maturin`
-
-### API alvo
-
-1. `pack_masked(...) -> placements`
-2. `pack_tight(...) -> placements`
-3. `remove_white_rgba(...) -> rgba`
-
-## Fase 6: Validacao e Rollout
-
-### Meta
-
-Trocar a implementacao com seguranca.
-
-### Acoes
-
-1. Comparar Python vs Rust em:
-   - tempo
-   - memoria
-   - colisao
-   - altura final
-   - consistencia visual
-2. Liberar em etapas:
-   - fase A: Rust opcional
-   - fase B: Rust padrao com fallback Python
-   - fase C: remover fallback so se a versao nativa estiver madura
-
-## Fase 7: Melhorias de Produto
+## Fase 4: Melhorias de Produto
 
 ### Meta
 
@@ -150,15 +77,13 @@ Depois da base estar rapida e estavel, melhorar a operacao diaria.
 4. Exportar resumo por execucao.
 5. Melhorar a observabilidade do processamento.
 
-## Estrutura Futura Sugerida
+## Estrutura Sugerida
 
 ```text
 ajudante_impressao/
   ui/
   services/
   algorithms/
-native/
-  packer_rs/
 tests/
   benchmarks/
   golden_outputs/

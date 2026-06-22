@@ -1,17 +1,18 @@
 # Algoritmo de Encaixe de Imagens
 
-Este documento descreve como o empacotamento de imagens funciona no projeto, com foco em `packing_algorithms.py`.
+Este documento descreve como o empacotamento de imagens funciona no projeto, com foco no único modo suportado agora: `pack_images_masked`.
 
 ## Objetivo
 
-Organizar imagens recortadas dentro da largura util do rolo com:
+Organizar imagens recortadas dentro da largura útil do rolo com:
 
-- margem externa
-- espacamento entre pecas
-- opcao de rotacao
-- menor altura final possivel
+- Margem externa
+- Espaçamento entre peças
+- Opção de rotação
+- Menor altura final possível
+- **Máximo contato entre peças** para evitar buracos e desperdício de mídia
 
-O resultado de cada algoritmo e uma lista de itens no formato:
+O resultado é uma lista de itens no formato:
 
 ```python
 (imagem, x, y)
@@ -21,259 +22,84 @@ mais a largura e a altura finais do canvas.
 
 ## Pipeline Antes do Encaixe
 
-Antes do pack, as imagens passam por etapas em `image_utils.py`:
+Antes do pack, as imagens passam por etapas em `image_ops.py`:
 
-1. normalizacao de DPI
-2. remocao de fundo branco
-3. recorte da area transparente
-4. ajuste de largura maxima, se necessario
+1. Normalização de DPI
+2. Remoção de fundo branco
+3. Recorte da área transparente
+4. Ajuste de largura máxima, se necessário
 
-Isso e importante porque o algoritmo trabalha em cima da geometria util da imagem, nao da tela bruta original.
+Isso é importante porque o algoritmo trabalha em cima da geometria útil da imagem real (sua máscara alfa), não da sua bounding box (caixa delimitadora) retangular.
 
-## Modos de Encaixe
+## Modo Poligonal por Máscara (`pack_images_masked`)
 
-### `pack_images_gallery`
+O algoritmo usa a máscara alfa real da imagem para calcular o encaixe. O encaixe é feito usando o conceito de **No-Fit Polygon (NFP) no espaço raster** aliado a uma simulação de **gravidade multidirecional**.
 
-Modo por linhas.
+### Ideia Central do NFP Raster
 
-Estrategia:
+Para saber onde uma peça cabe sem colidir com as outras, o algoritmo realiza uma operação de **erosão morfológica**:
 
-1. recorta bordas vazias
-2. opcionalmente gira imagens muito verticais
-3. normaliza tudo para uma altura-base
-4. ordena por area
-5. distribui em linhas
-6. aplica um pequeno fator de escala para preencher melhor a largura
+1. Identifica o espaço livre atual no canvas (`livre = NOT ocupado`).
+2. Erode esse espaço livre usando a máscara da peça (`posições_válidas = cv2.erode(livre, máscara)`).
+3. Qualquer pixel com valor 1 no resultado da erosão é um ponto válido (x,y) onde o canto superior esquerdo da peça pode ser colocado sem gerar colisão.
 
-Vantagem:
+Essa operação matemática em imagens binárias é extremamente rápida e retorna todos os pontos candidatos de uma vez, substituindo a antiga busca pixel a pixel (`_collides`).
 
-- resultado visual mais regular
-- bom para mosaico horizontal
+### Etapas do Algoritmo
 
-Limite:
+#### 1. Preparação de Variantes
 
-- ainda depende de linhas
-- nao explora bem encaixe de formatos irregulares
+Para cada imagem, o algoritmo gera variantes rotacionadas e recorta bordas vazias, criando uma máscara alfa binária para cada variante. Rotações suportadas (`allow_rotate=True`): 0, 90, 15, -15, 30, -30, 45, -45, 60, -60, 75, -75 graus.
 
-### `pack_images_fast`
+#### 2. Ordenação das Peças
 
-Modo guloso por linhas.
+As peças são ordenadas (peças maiores primeiro) por:
+- Área real da máscara
+- Altura máxima
+- Largura máxima
 
-Estrategia:
+#### 3. Busca Multi-Escala (Coarse-to-Fine)
 
-1. prepara imagens
-2. ordena por altura e largura
-3. tenta encaixar cada item na linha com menor sobra horizontal
-4. cria nova linha quando nao cabe
+Para ganhar velocidade, a erosão morfológica não é feita no tamanho original da imagem imediatamente:
+- **Coarse**: O espaço livre e a máscara são reduzidos (fator de escala de 2x ou 4x, dependendo do `performance_mode`). A erosão é feita e os pixels válidos geram candidatos aproximados.
+- **Fine**: Para os candidatos promissores, o algoritmo volta à escala original e testa o entorno próximo com `_collides` para garantir a precisão de 1 pixel.
 
-Vantagem:
+#### 4. Avaliação (Scoring e Contato)
 
-- simples
-- rapido
+Cada posição válida encontrada recebe um score:
+- Posições que aumentam a altura total do canvas são penalizadas.
+- O algoritmo calcula o **contato** com as peças ao redor (usando `_score_contact`). Posições que tocam mais pixels de outras peças recebem um bônus.
 
-Limite:
+O objetivo duplo é não aumentar a altura do rolo e evitar buracos isolados.
 
-- aproveitamento menor
-- ruim para formatos muito diferentes
+#### 5. Gravity Nudge Total
 
-### `pack_images_tight`
+Depois de escolher a melhor posição inicial, a peça sofre a "gravidade":
+A função `_nudge_gravity_full` testa mover a peça em 4 direções principais e diagonais (cima, esquerda, cima-esquerda, cima-direita) iterativamente, reduzindo o passo a cada iteração. Isso simula a peça escorregando pelos contornos das outras peças até encontrar um ponto mínimo local (o encaixe mais justo possível).
 
-Modo baseado em skyline 1D.
+#### 6. Reserva de Espaçamento
 
-Estrategia:
+Depois que a peça finaliza seu deslocamento gravitacional, o `_stamp_reserved` grava a máscara no mapa 2D (`occupancy`) e dilata as bordas pelo valor de `spacing`, garantindo a distância mínima para a próxima peça.
 
-1. ordena imagens por area
-2. mantem um perfil de altura por coluna do rolo
-3. testa posicoes em passos discretos (`step`)
-4. escolhe a posicao que minimiza a base inferior da peca
-
-Vantagem:
-
-- melhor compactacao que os modos por linha
-- custo computacional controlado
-
-Limite:
-
-- usa apenas a caixa delimitadora
-- nao considera a forma real da area transparente
-
-## Modo Poligonal por Mascara
-
-### `pack_images_masked`
-
-Este e o modo mais avancado atualmente.
-
-Ele nao faz nesting geometrico por poligono matematico puro. Em vez disso, usa a mascara alfa real da imagem como area ocupada.
-
-### Ideia central
-
-Cada imagem vira uma mascara binaria:
-
-- pixel com alfa > 0 = ocupado
-- pixel transparente = livre
-
-O encaixe passa a ser feito por colisao real entre mascaras, e nao apenas por retangulos.
-
-## Etapas do `masked`
-
-### 1. Preparacao de variantes
-
-Funcao: `_prepare_mask_variants`
-
-Para cada imagem:
-
-1. recorta bordas vazias
-2. gera variantes rotacionadas
-3. limita a largura ao rolo util
-4. gera mascara alfa binaria
-5. remove variantes duplicadas por assinatura
-
-Rotacoes usadas quando `allow_rotate=True`:
-
-- `0`
-- `90`
-- `15`, `-15`
-- `30`, `-30`
-- `45`, `-45`
-- `60`, `-60`
-- `75`, `-75`
-
-Isso melhora o aproveitamento sem entrar em busca angular continua.
-
-### 2. Ordenacao das pecas
-
-Cada peca e ordenada por:
-
-- area real ocupada
-- maior altura entre variantes
-- maior largura entre variantes
-
-Na pratica, pecas mais grandes entram primeiro, o que reduz a chance de sobrar apenas espacos pequenos e inuteis.
-
-### 3. Mapa de ocupacao
-
-O algoritmo mantem um `occupancy` 2D em `numpy`.
-
-Esse mapa representa:
-
-- pixels ja ocupados por pecas
-- reserva extra para o espacamento
-
-Quando a altura atual nao e suficiente, `_ensure_height` expande a matriz.
-
-### 4. Pontos candidatos
-
-Em vez de varrer o canvas inteiro, o algoritmo testa um conjunto de pontos candidatos.
-
-Esses pontos nascem de:
-
-- canto superior esquerdo inicial
-- borda direita de pecas ja colocadas
-- borda inferior de pecas ja colocadas
-- um ponto intermediario abaixo da peca
-
-Isso reduz custo e mantem boa qualidade.
-
-### 5. Colisao real
-
-Funcao: `_collides`
-
-Para cada variante e ponto candidato:
-
-1. verifica limites do canvas
-2. cruza a mascara da peca com a regiao ocupada
-3. rejeita a posicao se houver qualquer sobreposicao
-
-Esse e o ponto que diferencia o modo `masked` dos modos baseados em caixa delimitadora.
-
-### 6. Score local
-
-Funcao: `_score_candidate`
-
-Cada posicao recebe score com base em:
-
-- altura maxima resultante
-- base inferior da nova peca
-- desperdicio local da bounding box
-- proximidade das bordas laterais
-
-Objetivo:
-
-- reduzir altura final
-- evitar espacos ruins
-- manter layout mais compacto
-
-### 7. Reserva de espacamento
-
-Funcao: `_stamp_reserved`
-
-Depois de posicionar uma peca, o algoritmo:
-
-1. grava a mascara ocupada
-2. expande essa ocupacao pela distancia de `spacing`
-3. impede que a proxima peca encoste demais
-
-Essa etapa usa uma dilatacao discreta da mascara base.
-
-## Parametros que Mais Influenciam
+## Parâmetros que Mais Influenciam
 
 ### `spacing`
-
-Controla a distancia minima entre pecas.
-
-- maior `spacing` = mais seguranca
-- menor `spacing` = melhor aproveitamento
+Controla a distância mínima entre peças.
 
 ### `margin`
-
-Define a borda externa do rolo.
+Define a borda externa não imprimível do rolo.
 
 ### `step`
+Afeta marginalmente o refinamento, mas grande parte da precisão agora é governada pela erosão do NFP.
 
-Controla a granularidade da busca:
-
-- `step` menor = melhor encaixe e maior custo
-- `step` maior = busca mais rapida e possivelmente menos precisa
+### `performance_mode`
+- `quality`: Fator de escala menor (1x ou 2x) para erosão morfológica, demorado mas encontra espaços exatos.
+- `balanced`: Fator de escala médio (2x).
+- `fast`: Fator de escala agressivo (4x), acha encaixes mais rápido mas pode pular vãos pequenos muito estreitos.
 
 ### `allow_rotate`
-
-Ativa as variantes rotacionadas discretas.
+Ativa as variantes rotacionadas discretas (essencial para encaixes de peças triangulares ou muito assimétricas).
 
 ## Tradeoffs
 
-### Qualidade vs tempo
-
-O modo `masked` entrega melhor aproveitamento, mas custa mais que `gallery`, `fast` e `tight`.
-
-### Raster vs geometria vetorial
-
-O algoritmo trabalha em raster binario.
-
-Vantagem:
-
-- integra bem com imagens recortadas por transparencia
-- simples de validar
-
-Limite:
-
-- nao e um solver de nesting vetorial puro
-- a precisao depende da resolucao da imagem e do `step`
-
-## Quando usar cada modo
-
-- `gallery`
-  quando a prioridade e organizacao visual em linhas
-- `fast`
-  quando a prioridade e velocidade
-- `tight`
-  quando quer compactacao melhor com custo moderado
-- `masked`
-  quando a prioridade e aproveitar melhor formas irregulares
-
-## Pontos futuros de evolucao
-
-- busca multi-resolucao
-- score com penalidade de fragmentacao de vazios
-- refinamento local apos a solucao inicial
-- heuristicas de ancoragem mais fortes
-- representacao vetorial aproximada para no-fit polygon
+A principal vantagem dessa abordagem híbrida (NFP Raster + Gradient Gravity) é o **altíssimo nível de compactação** para formatos muito irregulares (como recortes de displays, letras em acrílico, tótens de chão), dispensando a implementação complexa (e pesada) do NFP vetorial via polígonos. A desvantagem é o alto consumo de memória para a geração dos arrays numpy temporários em imagens de altíssima resolução.

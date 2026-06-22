@@ -46,10 +46,8 @@ class AjudanteImpressaoQtApp(QMainWindow):
 
         title = QLabel("STUDIO DE IMPRESSAO")
         title.setObjectName("title")
-        title.setFont(QFont("Courier New", 22, QFont.Weight.Bold))
         subtitle = QLabel("Operacao focada em montagem de rolo e corte de painel")
         subtitle.setObjectName("subtitle")
-        subtitle.setFont(QFont("Courier New", 11))
 
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)

@@ -246,6 +246,25 @@ def _get_cache_key(file: Path, threshold: int) -> str:
     return hashlib.md5(data.encode()).hexdigest()
 
 
+def update_image_cache_meta(folder: Path, filename: str, threshold: int, metadata_updates: dict) -> None:
+    file = folder / filename
+    if not file.exists():
+        return
+    try:
+        key = _get_cache_key(file, threshold)
+        cache_dir = folder / ".ajudante_cache"
+        meta_file = cache_dir / f"{key}.json"
+        if meta_file.exists():
+            import json
+            with open(meta_file, "r", encoding="utf-8") as j:
+                meta = json.load(j)
+            meta.update(metadata_updates)
+            with open(meta_file, "w", encoding="utf-8") as j:
+                json.dump(meta, j, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def process_images(
     folder: Path,
     max_width_px: int,
@@ -277,6 +296,11 @@ def process_images(
                     meta = json.load(j)
                 processed = Image.open(cache_file)
                 processed.load() # Garantir que foi lida
+                
+                # Se as dimensões no JSON forem diferentes do arquivo original do cache, redimensiona
+                if "width_px" in meta and (meta["width_px"] != processed.width or meta["height_px"] != processed.height):
+                    processed = processed.resize((meta["width_px"], meta["height_px"]), Image.Resampling.LANCZOS)
+                
                 imgs.append({
                     "name": f.name,
                     "image": processed,

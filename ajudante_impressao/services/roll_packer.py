@@ -9,7 +9,7 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None  # Permitir processar imagens muito grandes
 
 from ..algorithms.image_ops import add_label_to_image, cm_to_px, process_images, rgba_to_white_background
-from ..algorithms.packing import build_canvas, pack_images_fast, pack_images_gallery, pack_images_masked, pack_images_tight
+from ..algorithms.packing import build_canvas, pack_images_masked
 
 
 PERFORMANCE_PROFILES = {
@@ -33,7 +33,6 @@ class RollerPackRequest:
     threshold: int
     step_px: int
     allow_rotate: bool
-    packing_mode: str
     row_height_cm: float
     output_name: str
     performance_mode: str
@@ -52,6 +51,8 @@ class RollerPackResult:
     final_image: Image.Image
     final_jpeg: Image.Image
     image_items: list[dict]
+    dxf_path: Path | None = None
+    packed: list[tuple[Image.Image, int, int]] | None = None
 
 
 def run_roll_packer(
@@ -69,11 +70,7 @@ def run_roll_packer(
     usable_width = max(1, roll_px - 2 * margin_px)
     effective_step = max(1, int(round(max(1, request.step_px) * profile["step_multiplier"])))
 
-    from ..algorithms.packing import HAS_NUMBA
-    perf_msg = " [TURBO MODE: Numba Ativo]" if HAS_NUMBA else " [MODO LENTO: Numba não detectado]"
-    
     log_fn(f"{'─' * 58}\n", "muted")
-    log_fn(f"  {perf_msg}\n", "ok" if HAS_NUMBA else "warn")
     log_fn(f"  Rolo: {request.largura_cm}cm = {roll_px}px\n", "info")
     log_fn(f"  Margem: {request.margem_cm}cm = {margin_px}px\n", "info")
     log_fn(f"  Espacamento: {request.espaco_cm}cm = {spacing_px}px\n", "info")
@@ -83,7 +80,6 @@ def run_roll_packer(
     log_fn(f"  Perfil: {profile['label']}\n", "info")
     log_fn(f"  Step encaixe: {effective_step}px\n", "info")
     log_fn(f"  Rotacao automatica: {'SIM' if request.allow_rotate else 'NAO'}\n", "info")
-    log_fn(f"  Modo: {request.packing_mode}\n", "info")
     log_fn(f"{'─' * 58}\n\n", "muted")
 
     if image_items is None:
@@ -115,54 +111,22 @@ def run_roll_packer(
         ))
 
     status_fn("Calculando layout...")
+    log_fn("\nCalculando layout poligonal por mascara alfa...\n", "info")
 
-    if request.packing_mode == "gallery":
-        log_fn("\nGerando mosaico horizontal por linhas...\n", "info")
-        packed, final_w, final_h = pack_images_gallery(
-            images=images,
-            max_width=roll_px,
-            spacing=spacing_px,
-            margin=margin_px,
-            row_height=max(30, row_height_px),
-            allow_rotate=request.allow_rotate,
-        )
-    elif request.packing_mode == "fast":
-        log_fn("\nCalculando layout rapido...\n", "info")
-        packed, final_w, final_h = pack_images_fast(
-            images=images,
-            max_width=roll_px,
-            spacing=spacing_px,
-            margin=margin_px,
-            allow_rotate=request.allow_rotate,
-        )
-    elif request.packing_mode == "masked":
-        log_fn("\nCalculando layout poligonal por mascara alfa...\n", "info")
-        
-        def progress_callback(current, total):
-            if current % 5 == 0 or current == total:
-                log_fn(f"    Encaixando imagem {current} de {total}...\n", "muted")
+    def progress_callback(current, total):
+        if current % 5 == 0 or current == total:
+            log_fn(f"    Encaixando imagem {current} de {total}...\n", "muted")
 
-        packed, final_w, final_h = pack_images_masked(
-            images=images,
-            max_width=roll_px,
-            spacing=spacing_px,
-            margin=margin_px,
-            step=effective_step,
-            allow_rotate=request.allow_rotate,
-            progress_cb=progress_callback,
-            performance_mode=request.performance_mode
-        )
-    else:
-        log_fn("\nCalculando layout compacto...\n", "info")
-        packed, final_w, final_h = pack_images_tight(
-            images=images,
-            max_width=roll_px,
-            spacing=spacing_px,
-            margin=margin_px,
-            step=effective_step,
-            allow_rotate=request.allow_rotate,
-            performance_mode=request.performance_mode,
-        )
+    packed, final_w, final_h = pack_images_masked(
+        images=images,
+        max_width=roll_px,
+        spacing=spacing_px,
+        margin=margin_px,
+        step=effective_step,
+        allow_rotate=request.allow_rotate,
+        progress_cb=progress_callback,
+        performance_mode=request.performance_mode
+    )
 
     log_fn(
         f"  Canvas final: {final_w}×{final_h}px  ({final_w / 100 * 2.54:.1f}cm × {final_h / 100 * 2.54:.1f}cm)\n",
@@ -204,6 +168,23 @@ def run_roll_packer(
         final_jpeg.save(str(output_path), format="JPEG", dpi=(100, 100), quality=profile["jpeg_quality"])
         log_fn(f"\nSalvo em:\n    {output_path}\n", "ok")
 
+    # Gerar DXF do rolo final
+    status_fn("Gerando DXF do rolo final...")
+    log_fn("\nGerando DXF de corte para o rolo final...\n", "info")
+    dxf_path = output_path.with_suffix(".dxf")
+    try:
+        _generate_roll_dxf(
+            packed=packed,
+            final_h=final_h,
+            output_dxf_path=dxf_path,
+            image_items=image_items,
+            dpi=100,
+        )
+        log_fn(f"    ✓ DXF salvo: {dxf_path.name}\n", "ok")
+    except Exception as exc:
+        dxf_path = None
+        log_fn(f"  ✗ Erro ao gerar DXF: {exc}\n", "err")
+
     log_fn(f"    {len(packed)} imagens posicionadas.\n", "ok")
     log_fn(f"\n{'─' * 58}\n", "muted")
 
@@ -216,4 +197,119 @@ def run_roll_packer(
         final_image=final,
         final_jpeg=final_jpeg,
         image_items=image_items,
+        dxf_path=dxf_path,
+        packed=packed,
     )
+
+
+def _generate_roll_dxf(
+    packed: list[tuple[Image.Image, int, int]],
+    final_h: int,
+    output_dxf_path: Path,
+    image_items: list[dict],
+    dpi: int = 100,
+    simplify_eps: float = 2.0,
+    close_gap_pct: float = 3.0,
+    edge_sensitivity: int = 30,
+    layer_name: str = "CORTE",
+) -> Path:
+    """Extrai os contornos das imagens limpas originais e os gera no DXF final do rolo."""
+    import ezdxf
+    from ezdxf import units
+    import cv2
+    import numpy as np
+    from ..algorithms.image_ops import trim_empty_borders
+    from ..algorithms.packing import _rotate_image
+
+    doc = ezdxf.new(dxfversion="R2010")
+    doc.units = units.MM
+    msp = doc.modelspace()
+    doc.layers.add(layer_name, color=1)  # Vermelho padrão ACI
+
+    for img, x, y in packed:
+        orig_id = img.info.get("_original_id", None)
+        angle = img.info.get("_original_angle", 0)
+
+        if orig_id is None or orig_id >= len(image_items):
+            clean_variant = img
+        else:
+            clean_img = image_items[orig_id]["image"]
+            clean_cropped = trim_empty_borders(clean_img)
+            if angle != 0:
+                clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
+            else:
+                clean_variant = clean_cropped
+
+        if clean_variant.mode != "RGBA":
+            clean_variant = clean_variant.convert("RGBA")
+        alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
+        mask_bin = (alpha > 0).astype(np.uint8) * 255
+
+        if not mask_bin.any():
+            continue
+
+        # OTIMIZAÇÃO CRÍTICA: se a imagem for grande, redimensionamos a máscara binária
+        # para uma resolução menor (max 1000px) antes das operações morfológicas pesadas.
+        orig_h, orig_w = mask_bin.shape
+        max_dim = max(orig_h, orig_w)
+        if max_dim > 1000:
+            scale_factor = max_dim / 1000.0
+            down_w = int(round(orig_w / scale_factor))
+            down_h = int(round(orig_h / scale_factor))
+            # Usamos interpolação por área que preserva bem a silhueta
+            mask_proc = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
+        else:
+            scale_factor = 1.0
+            mask_proc = mask_bin
+
+        min_side = min(mask_proc.shape[0], mask_proc.shape[1])
+        close_radius = max(15, int(min_side * close_gap_pct / 100))
+        kernel_size = 2 * close_radius + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        
+        mask_dilated = cv2.dilate(mask_proc, kernel, iterations=1)
+        mask_closed = cv2.morphologyEx(mask_dilated, cv2.MORPH_CLOSE, kernel)
+        
+        flood = mask_closed.copy()
+        h_m, w_m = flood.shape
+        border_mask = np.zeros((h_m + 2, w_m + 2), np.uint8)
+        cv2.floodFill(flood, border_mask, (0, 0), 255)
+        holes = cv2.bitwise_not(flood)
+        mask_filled = cv2.bitwise_or(mask_closed, holes)
+
+        contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+            
+        main_contour = max(contours, key=cv2.contourArea)
+
+        if simplify_eps > 0:
+            arc = cv2.arcLength(main_contour, True)
+            epsilon = max(1.0, simplify_eps * arc / 1000.0)
+            simplified = cv2.approxPolyDP(main_contour, epsilon, True)
+        else:
+            simplified = main_contour
+
+        points_mm = []
+        for pt in simplified:
+            local_x, local_y = pt[0]
+            # Escala de volta para a resolução original
+            orig_local_x = local_x * scale_factor
+            orig_local_y = local_y * scale_factor
+            
+            roll_x = x + orig_local_x
+            roll_y = y + orig_local_y
+            
+            x_mm = (roll_x / dpi) * 25.4
+            y_mm = ((final_h - roll_y) / dpi) * 25.4
+            points_mm.append((x_mm, y_mm))
+
+        if len(points_mm) >= 3:
+            msp.add_lwpolyline(
+                points_mm,
+                dxfattribs={"layer": layer_name, "closed": True},
+            )
+
+    output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.saveas(str(output_dxf_path))
+    return output_dxf_path

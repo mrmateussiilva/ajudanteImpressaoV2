@@ -14,7 +14,7 @@ O **Studio de Impressão** é uma aplicação desktop desenvolvida em Python e P
 ### Princípios de Design e Filosofia
 * **Foco no Uso Real**: Apenas ferramentas de alto impacto na operação diária. O escopo é estritamente limitado aos módulos `Rolo Packer` e `Cut Panel`.
 * **Automação com Clareza**: O operador deve compreender e ter visibilidade do que o sistema está fazendo, mantendo o controle das decisões finais.
-* **Performance Híbrida**: O que não é gargalo computacional permanece em Python pela rapidez de desenvolvimento; o processamento pesado de imagens e geometria usa aceleração matemática (Numba/NumPy) e, futuramente, será migrado para Rust.
+* **Performance Híbrida**: O que não é gargalo computacional permanece em Python pela rapidez de desenvolvimento; o processamento pesado de imagens e geometria usa aceleração matemática (Numba/NumPy).
 * **Evolução Incremental**: Modificações devem ser medidas, testadas e introduzidas progressivamente, mantendo fallbacks robustos.
 
 ---
@@ -49,12 +49,9 @@ ajudanteImpressaoV2/
 │           ├── __init__.py
 │           ├── cut_panel.py   # Interface visual do Cut Panel
 │           └── roll_packer.py  # Interface visual do Rolo Packer
-├── native/                    # Módulos compilados nativamente (Rust)
-│   └── packer_rs/             # Base inicial para futura portabilidade de performance
-└── docs/                      # Documentação técnica de desenvolvimento
-    ├── packing-algorithm.md
-    ├── roadmap.md
-    └── rust-migration.md
+├── docs/                      # Documentação técnica de desenvolvimento
+│   ├── packing-algorithm.md
+│   └── roadmap.md
 ```
 
 ---
@@ -153,7 +150,5 @@ Como a aplicação manipula arquivos de imagem extremamente pesados que facilmen
 O projeto encontra-se em uma fase em que a arquitetura e os algoritmos em Python puro estão consolidados e testados. Os objetivos técnicos de longo prazo são:
 
 1. **Benchmark Sistemático**: Medir precisamente o tempo e o consumo de memória dos algoritmos em Python (com e sem Numba JIT) com imagens reais muito grandes para criar uma linha de base estável.
-2. **Migração Crítica para Rust**:
-   * Utilizar **PyO3** e **Maturin** para portar a parte lógica computacional de `packing.py` (especialmente `pack_images_masked` e colisores alfa) e `image_ops.py` (`remove_white`) para Rust.
-   * Manter toda a parte de interface gráfica (PySide6), E/S de arquivos, logs e controle de fluxo geral em **Python**.
-3. **Fallback Seguro**: Garantir que se a biblioteca nativa compilada em Rust não estiver disponível no sistema, o software automaticamente ative a implementação Python puro de forma imperceptível para o usuário final, apenas alertando no console do Rolo Packer.
+2. **Refinamento Algorítmico**: Melhorar os algoritmos de packing, otimizando o heurístico e reduzindo processamento redundante em Python puro.
+3. **Usabilidade e Logs**: Melhorar a observabilidade do processamento, expondo melhor os gargalos para o operador.

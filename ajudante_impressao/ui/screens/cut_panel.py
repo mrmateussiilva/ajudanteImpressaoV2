@@ -175,7 +175,7 @@ class CutPanelWidget(QWidget, ScreenScaffold):
         layout.setSpacing(10)
 
         status_card, self.status_label, self.progress = self.build_status_panel("Aguardando...")
-        self.status_label.setFont(QFont("Courier New", 11))
+        self.status_label.setObjectName("muted")
         layout.addWidget(status_card)
 
         tabs = QTabWidget()

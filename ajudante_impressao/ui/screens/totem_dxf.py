@@ -251,7 +251,7 @@ class TotemDxfWidget(QWidget, ScreenScaffold):
         layout.setSpacing(10)
 
         status_card, self._status_label, self._progress = self.build_status_panel("Aguardando...")
-        self._status_label.setFont(QFont("Courier New", 11))
+        self._status_label.setObjectName("muted")
         layout.addWidget(status_card)
 
         self._tabs = QTabWidget()
