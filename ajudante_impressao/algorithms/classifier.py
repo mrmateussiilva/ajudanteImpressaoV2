@@ -5,14 +5,127 @@ from pathlib import Path
 from PIL import Image
 from typing import Optional, Dict, List
 
+import hashlib
+import json
+
+def _resolve_training_dir(default_windows_path: str, local_dirname: str) -> Path:
+    # 1. Se estiver no Windows e o caminho Z:\ existir, usa ele
+    win_path = Path(default_windows_path)
+    if os.name == 'nt' and win_path.exists():
+        return win_path
+        
+    # 2. Caminhos conhecidos no Linux (ambiente do usuário)
+    user_home = Path.home()
+    linux_paths = [
+        Path("/home/mateus/Documentos/Projects/Pessoais/impressor") / local_dirname,
+        user_home / "Documentos/Projects/Pessoais/impressor" / local_dirname,
+        Path(".") / local_dirname,
+    ]
+    for p in linux_paths:
+        if p.exists():
+            return p
+            
+    # 3. Fallback no diretório do projeto ou home
+    fallback = Path.home() / ".ajudante_impressao" / local_dirname
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 class ImageClassifier:
-    def __init__(self, training_dir: str, name: str = "Classifier"):
+    def __init__(self, training_dir: Path | str, name: str = "Classifier"):
         self.training_dir = Path(training_dir)
         self.name = name
         self.features = {} # Dict[category, List[Dict]]
         self.category_names = []
         self.trained = False
+        self.cache_file = Path.home() / ".ajudante_impressao" / f"cache_{self.name.lower()}.json"
         
+    def _get_training_state(self) -> str:
+        """Retorna uma string MD5 única que representa o estado atual da pasta de treinamento (arquivos e modificações)."""
+        if not self.training_dir.exists():
+            return ""
+        
+        state_parts = []
+        try:
+            # Coleta todas as pastas e arquivos na ordem correta
+            for cat_dir in sorted(self.training_dir.iterdir()):
+                if cat_dir.is_dir() and not cat_dir.name.startswith('.'):
+                    state_parts.append(f"cat:{cat_dir.name}")
+                    for file in sorted(cat_dir.iterdir()):
+                        if file.is_file() and file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
+                            mtime = file.stat().st_mtime
+                            size = file.stat().st_size
+                            state_parts.append(f"{file.name}:{mtime}:{size}")
+        except Exception:
+            return ""
+            
+        state_str = "|".join(state_parts)
+        return hashlib.md5(state_str.encode('utf-8')).hexdigest()
+
+    def _load_from_cache(self) -> bool:
+        """Tenta carregar o classificador treinado a partir do cache JSON local."""
+        try:
+            if not self.cache_file.exists():
+                return False
+                
+            current_hash = self._get_training_state()
+            if not current_hash:
+                return False
+                
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            if data.get("state_hash") != current_hash:
+                return False  # O diretório de treinamento foi modificado
+                
+            self.category_names = data.get("category_names", [])
+            self.features = {}
+            total_files = 0
+            for cat, feats in data.get("features", {}).items():
+                self.features[cat] = []
+                for feat in feats:
+                    self.features[cat].append({
+                        "aspect_ratio": feat["aspect_ratio"],
+                        "sharpness": feat["sharpness"],
+                        "hist": np.array(feat["hist"], dtype=np.float32),
+                        "size": tuple(feat["size"])
+                    })
+                    total_files += 1
+                    
+            self.trained = True
+            print(f"[{self.name}] Carregado do cache com sucesso: {total_files} imagens em {len(self.category_names)} categorias.")
+            return True
+        except Exception as e:
+            print(f"[{self.name}] Erro ao carregar cache: {e}")
+            return False
+
+    def _save_to_cache(self) -> None:
+        """Salva as features extraídas no arquivo de cache JSON local."""
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            serializable_features = {}
+            for cat, feats in self.features.items():
+                serializable_features[cat] = []
+                for feat in feats:
+                    serializable_features[cat].append({
+                        "aspect_ratio": feat["aspect_ratio"],
+                        "sharpness": feat["sharpness"],
+                        "hist": feat["hist"].tolist(),
+                        "size": list(feat["size"])
+                    })
+                    
+            data = {
+                "state_hash": self._get_training_state(),
+                "category_names": self.category_names,
+                "features": serializable_features
+            }
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            print(f"[{self.name}] Cache salvo em: {self.cache_file.name}")
+        except Exception as e:
+            print(f"[{self.name}] Erro ao salvar cache: {e}")
+
     def _extract_features(self, image_path_or_pil: Path | Image.Image) -> Optional[Dict]:
         """Extracts features (Aspect Ratio, Color Histogram, Sharpness) from an image."""
         try:
@@ -45,11 +158,16 @@ class ImageClassifier:
             return None
 
     def train(self):
-        """Loads features from the training directory."""
+        """Loads features from the training directory, using local cache if available."""
         if not self.training_dir.exists():
-            print(f"[{self.name}] Training dir {self.training_dir} not found.")
+            print(f"[{self.name}] Pasta de treinamento não encontrada: {self.training_dir}")
             return False
-        
+            
+        # Tenta carregar do cache antes de treinar
+        if self._load_from_cache():
+            return True
+            
+        print(f"[{self.name}] Treinando a partir do diretório: {self.training_dir} ...")
         # Re-scan for categories
         self.category_names = [d.name for d in self.training_dir.iterdir() if d.is_dir() and not d.name.startswith('.')]
         
@@ -66,7 +184,10 @@ class ImageClassifier:
                         total_files += 1
         
         self.trained = True
-        print(f"[{self.name}] Trained on {total_files} images across {len(self.category_names)} categories.")
+        print(f"[{self.name}] Treinamento finalizado. {total_files} imagens mapeadas.")
+        
+        # Salva o novo cache
+        self._save_to_cache()
         return True
 
     def classify(self, image: Image.Image, filename: Optional[str] = None) -> str:
@@ -132,14 +253,16 @@ _quality_classifier = None
 def get_prod_classifier():
     global _prod_classifier
     if _prod_classifier is None:
-        _prod_classifier = ImageClassifier(r"Z:\IMPRESSÃO DE TOTENS\treinamentos", "Producao")
+        training_path = _resolve_training_dir(r"Z:\IMPRESSÃO DE TOTENS\treinamentos", "treinamentos")
+        _prod_classifier = ImageClassifier(training_path, "Producao")
         _prod_classifier.train()
     return _prod_classifier
 
 def get_quality_classifier():
     global _quality_classifier
     if _quality_classifier is None:
-        _quality_classifier = ImageClassifier(r"Z:\IMPRESSÃO DE TOTENS\qualidade", "Qualidade")
+        training_path = _resolve_training_dir(r"Z:\IMPRESSÃO DE TOTENS\qualidade", "qualidade")
+        _quality_classifier = ImageClassifier(training_path, "Qualidade")
         _quality_classifier.train()
     return _quality_classifier
 
