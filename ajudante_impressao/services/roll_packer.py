@@ -222,35 +222,40 @@ def _extract_precise_contour(
     clean_variant: Image.Image,
     x: int,
     y: int,
-    alpha_threshold: int = 10,
-    close_gap_pct: float = 0.5,
+    alpha_threshold: int = 5,
     simplify_eps: float = 0.8,
 ) -> list[tuple[float, float]]:
-    """Extrai um contorno suave e preciso da imagem de alta qualidade.
-    Aplica suavização gaussiana para ruídos de borda, binarização adaptativa e
-    usa TC89_KCOS para curvas perfeitas, simplificando com base na raiz da área.
-    
-    Retorna uma lista de pontos (roll_x, roll_y) na resolução real.
+    """Extrai o contorno preciso da silhueta do elemento na imagem (Pipeline V2).
+
+    Melhorias em relação à versão anterior:
+      - Blur 5x5/sigma 1.2 (era 3x3/0.8): suaviza melhor o anti-aliasing
+      - Threshold alpha > 5 (era > 10): captura bordas mais finas
+      - Resolução max 2000px (era 1000px): preserva o dobro de detalhes
+      - APENAS morphological CLOSE kernel 5x5 fixo — SEM dilate extra
+        (dilate empurrava o contorno para fora, destruindo a silhueta)
+      - Epsilon = sqrt(area) * 0.005 (era * 0.015): 3x mais pontos preservados
+
+    Retorna lista de pontos (roll_x, roll_y) na resolução real do canvas.
     """
     import cv2
     import numpy as np
 
     alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
-    
-    # 1. Filtro gaussiano para suavizar serrilhados da borda antes do threshold
-    alpha_blur = cv2.GaussianBlur(alpha, (3, 3), 0.8)
-    
-    # 2. Threshold adaptativo simples para remover pixels semi-transparentes indesejados
+
+    # 1. Gaussian blur leve para suavizar anti-aliasing de borda
+    alpha_blur = cv2.GaussianBlur(alpha, (5, 5), 1.2)
+
+    # 2. Threshold baixo — captura bordas finas sem incluir ruído
     mask_bin = (alpha_blur > alpha_threshold).astype(np.uint8) * 255
 
     if not mask_bin.any():
         return []
 
-    # Reduz para resolução limite (máx 1000px) para eficiência nos algoritmos morfológicos
+    # 3. Reduz para max 2000px — preserva 2x mais detalhe que antes (era 1000px)
     orig_h, orig_w = mask_bin.shape
     max_dim = max(orig_h, orig_w)
-    if max_dim > 1000:
-        scale_factor = max_dim / 1000.0
+    if max_dim > 2000:
+        scale_factor = max_dim / 2000.0
         down_w = int(round(orig_w / scale_factor))
         down_h = int(round(orig_h / scale_factor))
         mask_proc = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
@@ -258,16 +263,12 @@ def _extract_precise_contour(
         scale_factor = 1.0
         mask_proc = mask_bin
 
-    # 3. Morfologia fina (apenas 0.5% em vez de 3%)
-    min_side = min(mask_proc.shape[0], mask_proc.shape[1])
-    close_radius = max(3, int(min_side * close_gap_pct / 100))
-    kernel_size = 2 * close_radius + 1
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    
-    mask_dilated = cv2.dilate(mask_proc, kernel, iterations=1)
-    mask_closed = cv2.morphologyEx(mask_dilated, cv2.MORPH_CLOSE, kernel)
-    
-    # 4. Fechamento de buracos internos via floodFill
+    # 4. APENAS morphological CLOSE com kernel fixo mínimo (5x5)
+    #    SEM dilate separado — dilate expande o contorno e perde detalhes finos
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_closed = cv2.morphologyEx(mask_proc, cv2.MORPH_CLOSE, kernel)
+
+    # 5. Fecha buracos internos via flood fill do exterior
     flood = mask_closed.copy()
     h_m, w_m = flood.shape
     border_mask = np.zeros((h_m + 2, w_m + 2), np.uint8)
@@ -275,22 +276,22 @@ def _extract_precise_contour(
     holes = cv2.bitwise_not(flood)
     mask_filled = cv2.bitwise_or(mask_closed, holes)
 
-    # 5. Encontra contornos usando CHAIN_APPROX_TC89_KCOS que é superior para curvas orgânicas
+    # 6. Contornos com TC89_KCOS — melhor curvatura para silhuetas orgânicas
     contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
     if not contours:
         return []
-        
+
     main_contour = max(contours, key=cv2.contourArea)
 
-    # 6. Simplificação inteligente proporcional à raiz da área (mais estável)
+    # 7. Simplificação com epsilon 3x menor — mantém muito mais pontos de detalhe
     if simplify_eps > 0:
         area = cv2.contourArea(main_contour)
-        epsilon = max(0.5, simplify_eps * np.sqrt(area) * 0.015)
+        epsilon = max(0.3, simplify_eps * np.sqrt(area) * 0.005)
         simplified = cv2.approxPolyDP(main_contour, epsilon, True)
     else:
         simplified = main_contour
 
-    # 7. Escala os pontos de volta à resolução original e translada para coordenadas do rolo
+    # 8. Translada de volta para coordenadas do canvas real
     points_roll = []
     for pt in simplified:
         local_x, local_y = pt[0]
@@ -301,6 +302,7 @@ def _extract_precise_contour(
     return points_roll
 
 
+
 def _generate_roll_dxf(
     packed: list[tuple[Image.Image, int, int]],
     final_h: int,
@@ -308,7 +310,6 @@ def _generate_roll_dxf(
     image_items: list[dict],
     dpi: int = 100,
     simplify_eps: float = 0.8,
-    close_gap_pct: float = 0.5,
     edge_sensitivity: int = 30,
     layer_name: str = "CORTE",
 ) -> Path:
@@ -345,8 +346,6 @@ def _generate_roll_dxf(
             clean_variant=clean_variant,
             x=x,
             y=y,
-            alpha_threshold=10,
-            close_gap_pct=close_gap_pct,
             simplify_eps=simplify_eps,
         )
 
@@ -376,7 +375,6 @@ def _save_debug_contours(
     output_path: Path,
     image_items: list[dict],
     simplify_eps: float = 0.8,
-    close_gap_pct: float = 0.5,
     scale_down: int = 4,
 ) -> None:
     """Gera uma imagem PNG de debug mostrando apenas os contornos das peças posicionadas no rolo.
@@ -427,8 +425,6 @@ def _save_debug_contours(
             clean_variant=clean_variant,
             x=x,
             y=y,
-            alpha_threshold=10,
-            close_gap_pct=close_gap_pct,
             simplify_eps=simplify_eps,
         )
 
