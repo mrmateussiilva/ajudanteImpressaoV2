@@ -69,5 +69,17 @@ try:
     t3 = time.time()
     print(f"Success! DXF generated at: {dxf_out} (File size: {dxf_out.stat().st_size} bytes)")
     print(f"DXF generation took {t3 - t2:.2f} seconds.")
+    
+    print("\nGenerating debug contours image...")
+    from ajudante_impressao.services.roll_packer import _save_debug_contours
+    dbg_img_out = Path("ajudante_impressao/scratch/debug_roll_debug_contornos.png")
+    _save_debug_contours(
+        packed=packed,
+        final_w=w,
+        final_h=h,
+        output_path=dbg_img_out,
+        image_items=image_items_test,
+    )
+    print(f"Success! Debug contours image saved at: {dbg_img_out}")
 except Exception as e:
-    print(f"Error generating DXF: {e}")
+    print(f"Error: {e}")
