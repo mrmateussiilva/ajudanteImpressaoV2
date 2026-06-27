@@ -185,6 +185,21 @@ def run_roll_packer(
         dxf_path = None
         log_fn(f"  ✗ Erro ao gerar DXF: {exc}\n", "err")
 
+    # Gerar imagem de debug com contornos
+    status_fn("Gerando imagem de debug (contornos)...")
+    debug_contour_path = output_path.with_name(output_path.stem + "_debug_contornos.png")
+    try:
+        _save_debug_contours(
+            packed=packed,
+            final_w=final_w,
+            final_h=final_h,
+            output_path=debug_contour_path,
+            image_items=image_items,
+        )
+        log_fn(f"    ✓ Debug de contornos salvo: {debug_contour_path.name}\n", "ok")
+    except Exception as exc:
+        log_fn(f"  ✗ Erro ao gerar debug de contornos: {exc}\n", "err")
+
     log_fn(f"    {len(packed)} imagens posicionadas.\n", "ok")
     log_fn(f"\n{'─' * 58}\n", "muted")
 
@@ -313,3 +328,169 @@ def _generate_roll_dxf(
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(output_dxf_path))
     return output_dxf_path
+
+
+def _save_debug_contours(
+    packed: list[tuple[Image.Image, int, int]],
+    final_w: int,
+    final_h: int,
+    output_path: Path,
+    image_items: list[dict],
+    simplify_eps: float = 2.0,
+    close_gap_pct: float = 3.0,
+    scale_down: int = 4,
+) -> None:
+    """Gera uma imagem PNG de debug mostrando apenas os contornos das peças posicionadas no rolo.
+
+    Args:
+        packed: Lista de (imagem, x, y) retornada pelo packer.
+        final_w: Largura total do canvas em pixels.
+        final_h: Altura total do canvas em pixels.
+        output_path: Caminho onde salvar o PNG de debug.
+        image_items: Lista de itens originais com chave 'image' (imagem limpa sem rótulo).
+        simplify_eps: Tolerância de simplificação de contorno (mesmo valor do DXF).
+        close_gap_pct: Porcentagem de fechamento de buracos (mesmo valor do DXF).
+        scale_down: Fator de redução da imagem de debug (4 = imagem 4x menor que o canvas real).
+    """
+    import cv2
+    import numpy as np
+    from ..algorithms.image_ops import trim_empty_borders
+    from ..algorithms.packing import _rotate_image
+
+    # O canvas de debug é reduzido para ser viável de salvar
+    dbg_w = max(1, final_w // scale_down)
+    dbg_h = max(1, final_h // scale_down)
+    sf = 1.0 / scale_down  # scale factor para o canvas de debug
+
+    # Fundo escuro
+    canvas = np.zeros((dbg_h, dbg_w, 3), dtype=np.uint8)
+    canvas[:] = (30, 30, 30)  # cinza bem escuro
+
+    # Cores por peça (rotativo)
+    PALETTE = [
+        (0, 220, 255),    # ciano
+        (0, 255, 128),    # verde
+        (255, 200, 0),    # amarelo
+        (255, 80, 80),    # vermelho claro
+        (200, 100, 255),  # roxo
+        (255, 160, 50),   # laranja
+        (80, 200, 255),   # azul claro
+        (255, 255, 255),  # branco
+    ]
+
+    for idx, (img, x, y) in enumerate(packed):
+        orig_id = img.info.get("_original_id", None)
+        angle = img.info.get("_original_angle", 0)
+
+        if orig_id is None or orig_id >= len(image_items):
+            clean_variant = img
+        else:
+            clean_img = image_items[orig_id]["image"]
+            clean_cropped = trim_empty_borders(clean_img)
+            if angle != 0:
+                clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
+            else:
+                clean_variant = clean_cropped
+
+        if clean_variant.mode != "RGBA":
+            clean_variant = clean_variant.convert("RGBA")
+
+        alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
+        mask_bin = (alpha > 0).astype(np.uint8) * 255
+
+        if not mask_bin.any():
+            continue
+
+        # Reduz para processamento (máx 1000px como no DXF)
+        orig_h, orig_w = mask_bin.shape
+        max_dim = max(orig_h, orig_w)
+        if max_dim > 1000:
+            proc_scale = max_dim / 1000.0
+            down_w = int(round(orig_w / proc_scale))
+            down_h = int(round(orig_h / proc_scale))
+            mask_proc = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
+        else:
+            proc_scale = 1.0
+            mask_proc = mask_bin
+
+        # Morfologia de fechamento (igual ao DXF)
+        min_side = min(mask_proc.shape[0], mask_proc.shape[1])
+        close_radius = max(15, int(min_side * close_gap_pct / 100))
+        kernel_size = 2 * close_radius + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        mask_dilated = cv2.dilate(mask_proc, kernel, iterations=1)
+        mask_closed = cv2.morphologyEx(mask_dilated, cv2.MORPH_CLOSE, kernel)
+
+        # Preenche buracos
+        flood = mask_closed.copy()
+        h_m, w_m = flood.shape
+        border_mask = np.zeros((h_m + 2, w_m + 2), np.uint8)
+        cv2.floodFill(flood, border_mask, (0, 0), 255)
+        holes = cv2.bitwise_not(flood)
+        mask_filled = cv2.bitwise_or(mask_closed, holes)
+
+        contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+
+        main_contour = max(contours, key=cv2.contourArea)
+
+        if simplify_eps > 0:
+            arc = cv2.arcLength(main_contour, True)
+            epsilon = max(1.0, simplify_eps * arc / 1000.0)
+            simplified = cv2.approxPolyDP(main_contour, epsilon, True)
+        else:
+            simplified = main_contour
+
+        # Converte pontos para o canvas de debug (escalonados)
+        total_scale = sf / proc_scale  # escala combinada: canvas_debug e proc_scale
+        pts_debug = []
+        for pt in simplified:
+            local_x, local_y = pt[0]
+            # Volta para a resolução original da imagem
+            orig_local_x = local_x * proc_scale
+            orig_local_y = local_y * proc_scale
+            # Posição no canvas real
+            roll_x = x + orig_local_x
+            roll_y = y + orig_local_y
+            # Escala para o canvas de debug
+            dbg_x = int(round(roll_x * sf))
+            dbg_y = int(round(roll_y * sf))
+            pts_debug.append([dbg_x, dbg_y])
+
+        if len(pts_debug) < 3:
+            continue
+
+        pts_np = np.array(pts_debug, dtype=np.int32).reshape((-1, 1, 2))
+        color = PALETTE[idx % len(PALETTE)]
+
+        # Preenche com cor semitransparente
+        overlay = canvas.copy()
+        cv2.fillPoly(overlay, [pts_np], color=(color[0] // 5, color[1] // 5, color[2] // 5))
+        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+
+        # Contorno com espessura proporcional
+        thickness = max(1, dbg_w // 400)
+        cv2.polylines(canvas, [pts_np], isClosed=True, color=color, thickness=thickness)
+
+        # Número da peça no centro do bounding rect
+        bx, by, bw, bh = cv2.boundingRect(pts_np)
+        cx = bx + bw // 2
+        cy = by + bh // 2
+        label = str(idx)
+        font_scale = max(0.3, min(1.2, bw / 120))
+        cv2.putText(
+            canvas, label,
+            (cx - 6, cy + 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            max(1, thickness),
+            cv2.LINE_AA,
+        )
+
+    # Salva como PNG
+    from PIL import Image as PILImage
+    debug_img = PILImage.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_img.save(str(output_path), format="PNG")
