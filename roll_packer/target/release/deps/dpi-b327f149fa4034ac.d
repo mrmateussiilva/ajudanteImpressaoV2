@@ -1,7 +1,0 @@
-C:\Users\User\Documents\Mateus\ajudanteImpressaoV2\roll_packer\target\release\deps\dpi-b327f149fa4034ac.d: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\dpi-0.1.2\src\lib.rs
-
-C:\Users\User\Documents\Mateus\ajudanteImpressaoV2\roll_packer\target\release\deps\libdpi-b327f149fa4034ac.rlib: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\dpi-0.1.2\src\lib.rs
-
-C:\Users\User\Documents\Mateus\ajudanteImpressaoV2\roll_packer\target\release\deps\libdpi-b327f149fa4034ac.rmeta: C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\dpi-0.1.2\src\lib.rs
-
-C:\Users\User\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\dpi-0.1.2\src\lib.rs:

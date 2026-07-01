@@ -121,7 +121,7 @@ O operador precisa entender o que foi feito e confiar na saida.
 
 ### 3. Performance orientada a gargalo
 
-O processamento pesado de imagens e geometria usa aceleração matemática (Numba/NumPy) em Python.
+O processamento pesado de imagens e geometria usa aceleração matemática em Python, com `NumPy`, `OpenCV` e `Numba` onde faz sentido.
 
 ### 4. Estrutura antes de expansao
 
@@ -145,6 +145,8 @@ A forma correta de melhorar o sistema e:
 - `PySide6`
 - `Pillow`
 - `numpy`
+- `opencv-python-headless`
+- `numba`
 - `uv`
 
 ## Arquitetura
