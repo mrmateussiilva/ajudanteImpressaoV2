@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import List
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from PIL import Image
 
-from .image_ops import fit_width, resize_to_height, trim_empty_borders
+from .image_ops import trim_empty_borders
 
 
 # ── Máscara alfa binária ──────────────────────────────────────────────────────
@@ -19,6 +19,25 @@ def _quantize(value: int, step: int, minimum: int) -> int:
     if value <= minimum:
         return minimum
     return minimum + ((value - minimum + step - 1) // step) * step
+
+
+@dataclass(slots=True)
+class MaskVariant:
+    image: Image.Image
+    mask: np.ndarray
+    area: int
+    angle: int
+
+
+@dataclass(slots=True)
+class PackedPiece:
+    image: Image.Image
+    mask: np.ndarray
+    x: int
+    y: int
+    w: int
+    h: int
+    area: int
 
 
 # ── Rotação via cv2 (3-5x mais rápido que PIL para 90/180/270) ────────────────
@@ -41,7 +60,7 @@ def _prepare_mask_variants(
     usable_width: int,
     allow_rotate: bool,
     performance_mode: str = "balanced",
-) -> list[dict]:
+) -> list[MaskVariant]:
     original_id = img.info.get("_original_id", None)
     img = trim_empty_borders(img)
     angle_candidates = [0]
@@ -56,7 +75,7 @@ def _prepare_mask_variants(
         else:  # fast — só 90
             angle_candidates.extend([90])
 
-    variants: list[dict] = []
+    variants: list[MaskVariant] = []
     seen: set[tuple[int, int, int]] = set()
 
     for angle in angle_candidates:
@@ -71,9 +90,9 @@ def _prepare_mask_variants(
         seen.add(signature)
         variant.info["_original_id"] = original_id
         variant.info["_original_angle"] = angle
-        variants.append({"image": variant, "mask": mask, "area": alpha_area})
+        variants.append(MaskVariant(image=variant, mask=mask, area=alpha_area, angle=angle))
 
-    variants.sort(key=lambda v: (v["area"], v["image"].height, v["image"].width), reverse=True)
+    variants.sort(key=lambda v: (v.area, v.image.height, v.image.width), reverse=True)
     return variants
 
 
@@ -188,122 +207,162 @@ def _score_candidate(
     return (increases_height, height_increase, fragmentation_penalty, -area, y, bottom, -center_dist)
 
 
+def _dedupe_candidates(candidates: list[tuple[int, int]], limit: int) -> list[tuple[int, int]]:
+    seen: set[tuple[int, int]] = set()
+    deduped: list[tuple[int, int]] = []
+    for x, y in candidates:
+        key = (int(x), int(y))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _collect_frontier_candidates(
+    occupancy: np.ndarray,
+    placed: list[PackedPiece],
+    margin: int,
+    max_width: int,
+    search_h: int,
+    piece_w: int,
+    piece_h: int,
+    step: int,
+    spacing: int,
+    limit: int = 256,
+) -> list[tuple[int, int]]:
+    candidates: list[tuple[int, int]] = [(margin, margin)]
+
+    max_y_used = max((piece.y + piece.h for piece in placed), default=margin)
+    band_top = max(margin, max_y_used - max(piece_h * 2, step * 6))
+    band_bottom = min(search_h, max_y_used + max(piece_h, step * 2))
+    row_stride = max(2, step // 2)
+    x_limit = max(margin, max_width - margin - piece_w)
+
+    for piece in placed:
+        right_x = piece.x + piece.w + spacing
+        below_y = piece.y + piece.h + spacing
+        candidates.append((right_x, piece.y))
+        candidates.append((piece.x, below_y))
+        candidates.append((right_x, below_y))
+        candidates.append((piece.x + piece.w // 2 - piece_w // 2, piece.y))
+        candidates.append((piece.x, piece.y + piece.h // 2 - piece_h // 2))
+
+    if band_bottom > band_top:
+        for y in range(band_top, band_bottom, row_stride):
+            row = occupancy[y, margin:max_width - margin]
+            if not row.any():
+                continue
+            padded = np.pad(row.astype(np.int8), (1, 1), mode="constant", constant_values=0)
+            transitions = np.diff(padded)
+            starts = np.where(transitions == 1)[0] + margin
+            ends = np.where(transitions == -1)[0] + margin
+            for start, end in zip(starts.tolist(), ends.tolist()):
+                candidates.append((end + spacing, y))
+                candidates.append((end, y))
+                candidates.append((max(margin, start - piece_w), y))
+                candidates.append((max(margin, start - piece_w // 2), y))
+                candidates.append((min(x_limit, end + spacing // 2), y))
+
+    filtered: list[tuple[int, int]] = []
+    for x, y in candidates:
+        if x < margin or y < margin:
+            continue
+        if x > x_limit:
+            continue
+        if y > search_h:
+            continue
+        filtered.append((x, y))
+
+    filtered.sort(key=lambda p: (p[1], p[0]))
+    return _dedupe_candidates(filtered, limit)
+
+
+def _refine_candidate(
+    occupancy: np.ndarray,
+    mask: np.ndarray,
+    x: int,
+    y: int,
+    min_x: int,
+    min_y: int,
+    max_occ_y: int,
+    max_width: int,
+    max_iters: int = 6,
+) -> tuple[int, int]:
+    step = 4
+    for _ in range(max_iters):
+        moved = False
+        for dx, dy in ((0, -1), (-1, 0), (-1, -1), (1, -1)):
+            nx = x + dx * step
+            ny = y + dy * step
+            if nx < min_x or ny < min_y:
+                continue
+            if nx + mask.shape[1] > max_width:
+                continue
+            if not _collides(occupancy, mask, nx, ny, max_occ_y):
+                x, y = nx, ny
+                moved = True
+                break
+        if not moved:
+            if step == 1:
+                break
+            step = max(1, step // 2)
+    return x, y
+
+
 def _find_valid_positions_nfp(
     occupancy: np.ndarray,
     mask: np.ndarray,
     max_width: int,
     margin: int,
     search_h: int,
-    scale: int = 8,
+    step: int = 8,
+    spacing: int = 0,
     top_k: int = 128,
 ) -> list[tuple[int, int]]:
-    """NFP raster via matchTemplate (FFT — O(N log N)).
+    """Busca guiada por fronteira e refinamento local.
 
-    CORREÇÃO CRÍTICA DE PERFORMANCE: redimensiona a occupancy uint8 diretamente
-    para a escala coarse, evitando criar um array float32 de tamanho full-res
-    (que chegaria a 1GB+ para canvas altos como totens de 7000px de altura).
+    A versão anterior fazia uma busca raster ampla com matchTemplate sobre
+    grande parte do canvas. Aqui a ideia é preservar a compactação, mas gerar
+    bem menos candidatos por peça.
     """
     h_m, w_m = mask.shape
+    if h_m <= 0 or w_m <= 0:
+        return [(margin, margin)]
 
-    h_c = max(2, search_h // scale)
-    w_c = max(2, max_width // scale)
-
-    # ── FAST PATH: canvas vazio — não precisa de NFP ──────────────────────────
     if not occupancy[:search_h, :].any():
         return [(margin, margin)]
 
-    # ── Coarse free map: redimensiona float32 direto para coarse ──────────────
-    # Evita perda de informação por arredondamento em uint8 binário (0/1).
-    occ_slice_f = occupancy[:search_h, :].astype(np.float32)
-    occ_small = cv2.resize(occ_slice_f, (w_c, h_c), interpolation=cv2.INTER_AREA)
-    # free_c: 1.0 = livre, 0.0 = ocupado (valores parciais nas bordas)
-    free_c = 1.0 - occ_small.clip(0.0, 1.0)
+    # Candidatos principais vindos da fronteira atual do layout.
+    placed: list[PackedPiece] = getattr(_find_valid_positions_nfp, "_placed_cache", [])  # type: ignore[attr-defined]
+    candidates = _collect_frontier_candidates(
+        occupancy=occupancy,
+        placed=placed,
+        margin=margin,
+        max_width=max_width,
+        search_h=search_h,
+        piece_w=w_m,
+        piece_h=h_m,
+        step=step,
+        spacing=spacing,
+        limit=top_k,
+    )
 
-    # ── Coarse mask ───────────────────────────────────────────────────────────
-    mask_w_c = max(1, w_m // scale)
-    mask_h_c = max(1, h_m // scale)
-    mask_f = mask.astype(np.float32)
-    mask_small = cv2.resize(mask_f, (mask_w_c, mask_h_c), interpolation=cv2.INTER_AREA)
-    mask_c = mask_small
+    if not candidates:
+        candidates = [(margin, max(margin, search_h - h_m))]
 
-    # Valida tamanhos para o matchTemplate
-    if mask_c.shape[0] >= free_c.shape[0] or mask_c.shape[1] >= free_c.shape[1]:
-        return [(margin, search_h - h_m)]
-
-    mask_sum = float(mask_c.sum())
-    if mask_sum < 1.0:
-        return [(margin, margin)]
-
-    # ── matchTemplate via FFT: O(N log N) ────────────────────────────────────
-    res = cv2.matchTemplate(free_c, mask_c, cv2.TM_CCORR)
-    res_norm = res / mask_sum  # 1.0 = encaixe perfeito no espaço livre
-
-    # Threshold decrescente — começa alto para evitar falsos positivos no coarse
-    ys_c = xs_c = np.array([], dtype=np.int64)
-    for thresh in (0.995, 0.97, 0.90, 0.75, 0.50, 0.20):
-        ys_c, xs_c = np.where(res_norm >= thresh)
-        if len(ys_c) > 0:
-            break
-
-    if len(ys_c) == 0:
-        return [(margin, search_h - h_m)]
-
-    # Filtra candidatos dentro das margens
-    margin_c = max(0, margin // scale)
-    x_limit_c = max(1, (max_width - margin - w_m) // scale)
-    valid = (ys_c >= margin_c) & (xs_c >= margin_c) & (xs_c <= margin_c + x_limit_c)
-    ys_c, xs_c = ys_c[valid], xs_c[valid]
-
-    if len(ys_c) == 0:
-        ys_c = np.array([margin_c])
-        xs_c = np.array([margin_c])
-
-    # Ordena por (y_coarse, x_coarse): preferir mais alto e mais à esquerda
-    order = np.lexsort((xs_c, ys_c))
-    
-    # Filtro de grade (NMS rápido): evita selecionar múltiplos candidatos muito próximos
-    # (por exemplo, deslocados por apenas alguns pixels coarse), garantindo que a lista
-    # de candidatos cubra diferentes regiões livres do rolo.
-    # Usamos um limite maior (2048) para coletar candidatos de várias alturas caso as posições
-    # superiores falhem no refinamento fino devido a colisões.
-    candidates_coarse = []
-    seen_cells = set()
-    for cx, cy in zip(xs_c[order].tolist(), ys_c[order].tolist()):
-        cell = (cx // 4, cy // 4)
-        if cell in seen_cells:
-            continue
-        seen_cells.add(cell)
-        candidates_coarse.append((cx, cy))
-        if len(candidates_coarse) >= 2048:
-            break
-
-    # ── Refinamento fine na resolução original ────────────────────────────────
     results: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
-    fine_step = max(1, scale // 2)
-
-    coarse_evaluated = 0
-    for cx_c, cy_c in candidates_coarse:
-        coarse_evaluated += 1
-        base_y = cy_c * scale
-        base_x = cx_c * scale
-
-        for dy in range(-scale, scale + 1, fine_step):
-            for dx in range(-scale, scale + 1, fine_step):
-                fy = base_y + dy
-                fx = base_x + dx
-                if fy < margin or fx < margin or fx + w_m > max_width - margin:
-                    continue
-                if (fx, fy) in seen:
-                    continue
-                seen.add((fx, fy))
-                if not _collides(occupancy, mask, fx, fy, search_h):
-                    results.append((fx, fy))
-
-        # Capped para evitar tempo excessivo de busca no refinamento, mas permitindo
-        # avaliar candidatos suficientes para alcançar espaços vazios.
-        if len(results) >= top_k or coarse_evaluated >= 1024:
-            break
+    for fx, fy in candidates:
+        if (fx, fy) in seen:
+            continue
+        seen.add((fx, fy))
+        if fx + w_m > max_width - margin or fy + h_m > search_h:
+            continue
+        if not _collides(occupancy, mask, fx, fy, search_h):
+            results.append((fx, fy))
 
     return results if results else [(margin, search_h - h_m)]
 
@@ -319,7 +378,7 @@ def _nudge_gravity_full(
 ) -> tuple[int, int]:
     """Desloca a peça em direção ao canto superior-esquerdo com passo decrescente."""
     DIRS = [(0, -1), (-1, 0), (-1, -1), (1, -1)]
-    step = 8
+    step = 4
     for _ in range(max_iters):
         moved = False
         for dx, dy in DIRS:
@@ -338,7 +397,7 @@ def _nudge_gravity_full(
 
 
 def pack_images_masked(
-    images: List[Image.Image],
+    images: list[Image.Image],
     max_width: int,
     spacing: int,
     margin: int,
@@ -373,27 +432,24 @@ def pack_images_masked(
         prepared.append({
             "variants": variants,
             "sort_key": (
-                primary["area"],
-                max(v["image"].height for v in variants),
-                max(v["image"].width for v in variants),
+                primary.area,
+                max(v.image.height for v in variants),
+                max(v.image.width for v in variants),
             ),
         })
 
     prepared.sort(key=lambda item: item["sort_key"], reverse=True)
 
-    total_alpha_area = sum(p["variants"][0]["area"] for p in prepared)
+    total_alpha_area = sum(p["variants"][0].area for p in prepared)
     estimated_height = int(total_alpha_area / max(1, usable_width) * 1.6) + margin * 4
     initial_height = max(64, margin * 2 + 1, estimated_height)
     occupancy = np.zeros((initial_height, max_width), dtype=np.uint8)
 
-    placed: list[tuple[Image.Image, int, int]] = []
+    placed: list[PackedPiece] = []
     max_y_used = margin
     stamp_kernel = _build_stamp_kernel(spacing) if spacing > 0 else None
     total_count = len(prepared)
-
-    # Scale factor para o NFP (coarse-to-fine):
-    # quality=4×, balanced=8×, fast=16× — mais agressivo = mais rápido
-    scale_factor = 16 if performance_mode == "fast" else (8 if performance_mode == "balanced" else 4)
+    candidate_limit = 96 if performance_mode == "quality" else (72 if performance_mode == "balanced" else 48)
 
     for processed_count, piece in enumerate(prepared):
         if progress_cb:
@@ -402,9 +458,13 @@ def pack_images_masked(
         best_choice = None
         max_occ_y = max_y_used + spacing
 
+        # Compartilha o estado já colocado com a busca de fronteira, evitando varrer
+        # o canvas inteiro para cada nova peça.
+        setattr(_find_valid_positions_nfp, "_placed_cache", placed)
+
         for variant in piece["variants"]:
-            img = variant["image"]
-            mask = variant["mask"]
+            img = variant.image
+            mask = variant.mask
             w, h = img.size
             # search_h cobre todo o canvas já usado + uma peça abaixo.
             # Isso permite que o NFP ache espaços livres em TODAS as linhas
@@ -413,11 +473,18 @@ def pack_images_masked(
             occupancy = _ensure_height(occupancy, search_h)
 
             valid_positions = _find_valid_positions_nfp(
-                occupancy, mask, max_width, margin, search_h, scale=scale_factor
+                occupancy,
+                mask,
+                max_width,
+                margin,
+                search_h,
+                step=step,
+                spacing=spacing,
+                top_k=candidate_limit,
             )
 
             for fx, fy in valid_positions:
-                score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used, variant["area"])
+                score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used, variant.area)
                 contact = _score_contact(occupancy, mask, fx, fy, spacing)
                 # Minimiza altura, maximiza contato entre peças
                 final_score = (score[0], score[1], -contact, score[2], score[3], score[4], score[5])
@@ -429,15 +496,40 @@ def pack_images_masked(
                         "score": final_score,
                     }
 
+            # Refinamento local a partir do melhor candidato desta variante.
+            if best_choice is not None and best_choice["image"] is img:
+                rx, ry = _refine_candidate(
+                    occupancy=occupancy,
+                    mask=mask,
+                    x=best_choice["x"],
+                    y=best_choice["y"],
+                    min_x=margin,
+                    min_y=margin,
+                    max_occ_y=max_occ_y + img.height + step,
+                    max_width=max_width,
+                )
+                if (rx, ry) != (best_choice["x"], best_choice["y"]):
+                    score = _score_candidate(mask, rx, ry, max_width, margin, max_y_used, variant.area)
+                    contact = _score_contact(occupancy, mask, rx, ry, spacing)
+                    refined_score = (score[0], score[1], -contact, score[2], score[3], score[4], score[5])
+                    if refined_score < best_choice["score"]:
+                        best_choice = {
+                            "image": img,
+                            "mask": mask,
+                            "x": rx,
+                            "y": ry,
+                            "score": refined_score,
+                        }
+
         # Fallback: coloca abaixo de tudo se nenhuma posição foi encontrada
         if best_choice is None:
             fallback = piece["variants"][0]
-            img = fallback["image"]
-            mask = fallback["mask"]
+            img = fallback.image
+            mask = fallback.mask
             best_choice = {
                 "image": img, "mask": mask,
                 "x": margin, "y": max_y_used + spacing,
-                "score": (1, img.height, 0, 0, -fallback["area"], margin, max_y_used + spacing),
+                "score": (1, img.height, 0, 0, -fallback.area, margin, max_y_used + spacing),
             }
 
         img = best_choice["image"]
@@ -458,12 +550,20 @@ def pack_images_masked(
             max_occ_y=nudge_occ_y,
         )
 
-        placed.append((img, x, y))
+        placed.append(PackedPiece(
+            image=img,
+            mask=mask,
+            x=x,
+            y=y,
+            w=img.width,
+            h=img.height,
+            area=int(mask.sum()),
+        ))
         _stamp_reserved(occupancy, mask, x, y, spacing, margin, max_width, stamp_kernel)
         max_y_used = max(max_y_used, y + img.height)
 
     final_height = max_y_used + margin
-    return placed, max_width, final_height
+    return [(piece.image, piece.x, piece.y) for piece in placed], max_width, final_height
 
 
 def build_canvas(packed, width, height):

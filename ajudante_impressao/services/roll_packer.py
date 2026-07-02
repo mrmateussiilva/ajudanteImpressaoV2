@@ -223,17 +223,15 @@ def _extract_precise_contour(
     x: int,
     y: int,
     alpha_threshold: int = 5,
-    simplify_eps: float = 0.8,
+    simplify_eps: float = 0.45,
 ) -> list[tuple[float, float]]:
     """Extrai o contorno preciso da silhueta do elemento na imagem (Pipeline V2).
 
-    Melhorias em relação à versão anterior:
-      - Blur 5x5/sigma 1.2 (era 3x3/0.8): suaviza melhor o anti-aliasing
-      - Threshold alpha > 5 (era > 10): captura bordas mais finas
-      - Resolução max 2000px (era 1000px): preserva o dobro de detalhes
-      - APENAS morphological CLOSE kernel 5x5 fixo — SEM dilate extra
-        (dilate empurrava o contorno para fora, destruindo a silhueta)
-      - Epsilon = sqrt(area) * 0.005 (era * 0.015): 3x mais pontos preservados
+    Estratégia atual:
+      - Usa o canal alfa como fonte primária da silhueta
+      - Evita blur para não deslocar a borda
+      - Simplifica bem menos que a versão anterior
+      - Só reduz a resolução quando a imagem é muito grande
 
     Retorna lista de pontos (roll_x, roll_y) na resolução real do canvas.
     """
@@ -242,20 +240,17 @@ def _extract_precise_contour(
 
     alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
 
-    # 1. Gaussian blur leve para suavizar anti-aliasing de borda
-    alpha_blur = cv2.GaussianBlur(alpha, (5, 5), 1.2)
-
-    # 2. Threshold baixo — captura bordas finas sem incluir ruído
-    mask_bin = (alpha_blur > alpha_threshold).astype(np.uint8) * 255
+    # 1. Threshold direto no alfa para preservar a borda real da arte
+    mask_bin = (alpha > alpha_threshold).astype(np.uint8) * 255
 
     if not mask_bin.any():
         return []
 
-    # 3. Reduz para max 2000px — preserva 2x mais detalhe que antes (era 1000px)
+    # 2. Reduz apenas quando a imagem é muito grande, para não destruir detalhe fino.
     orig_h, orig_w = mask_bin.shape
     max_dim = max(orig_h, orig_w)
-    if max_dim > 2000:
-        scale_factor = max_dim / 2000.0
+    if max_dim > 3200:
+        scale_factor = max_dim / 3200.0
         down_w = int(round(orig_w / scale_factor))
         down_h = int(round(orig_h / scale_factor))
         mask_proc = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
@@ -263,9 +258,8 @@ def _extract_precise_contour(
         scale_factor = 1.0
         mask_proc = mask_bin
 
-    # 4. APENAS morphological CLOSE com kernel fixo mínimo (5x5)
-    #    SEM dilate separado — dilate expande o contorno e perde detalhes finos
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    # 3. Fecha pequenos buracos internos sem empurrar a silhueta para fora.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask_closed = cv2.morphologyEx(mask_proc, cv2.MORPH_CLOSE, kernel)
 
     # 5. Fecha buracos internos via flood fill do exterior
@@ -276,22 +270,22 @@ def _extract_precise_contour(
     holes = cv2.bitwise_not(flood)
     mask_filled = cv2.bitwise_or(mask_closed, holes)
 
-    # 6. Contornos com TC89_KCOS — melhor curvatura para silhuetas orgânicas
-    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+    # 5. Mantém todos os pontos possíveis na captura do contorno externo
+    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return []
 
     main_contour = max(contours, key=cv2.contourArea)
 
-    # 7. Simplificação com epsilon 3x menor — mantém muito mais pontos de detalhe
+    # 6. Simplificação conservadora. Se quiser o contorno cru, passe simplify_eps <= 0.
     if simplify_eps > 0:
         area = cv2.contourArea(main_contour)
-        epsilon = max(0.3, simplify_eps * np.sqrt(area) * 0.005)
+        epsilon = max(0.2, simplify_eps * np.sqrt(area) * 0.002)
         simplified = cv2.approxPolyDP(main_contour, epsilon, True)
     else:
         simplified = main_contour
 
-    # 8. Translada de volta para coordenadas do canvas real
+    # 7. Translada de volta para coordenadas do canvas real
     points_roll = []
     for pt in simplified:
         local_x, local_y = pt[0]
@@ -470,4 +464,3 @@ def _save_debug_contours(
     debug_img = PILImage.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     debug_img.save(str(output_path), format="PNG")
-
