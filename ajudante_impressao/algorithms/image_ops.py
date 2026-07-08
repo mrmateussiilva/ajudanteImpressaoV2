@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, List
 
 import numpy as np
+import cv2
 import functools
 from PIL import Image, ImageOps, ImageDraw, ImageFont
 
@@ -145,6 +146,40 @@ def remove_white(img: Image.Image, threshold: int = 245, softness: int = 18) -> 
     return Image.fromarray(arr.astype(np.uint8), "RGBA")
 
 
+def remove_background(img: Image.Image, threshold: int = 245, softness: int = 18) -> Image.Image:
+    """Remove fundo claro conectado às bordas, preservando branco interno da arte."""
+    img = img.convert("RGBA")
+    arr = np.array(img)
+
+    rgb = arr[:, :, :3].astype(np.int16)
+    alpha = arr[:, :, 3].astype(np.float32)
+
+    white_tolerance = max(1, 255 - threshold)
+    distance_to_white = np.max(np.abs(255 - rgb), axis=2)
+    light_enough = distance_to_white <= white_tolerance
+
+    # Fundo só é removido se estiver conectado ao exterior da imagem. Isso evita
+    # apagar áreas brancas internas, textos claros e detalhes da própria arte.
+    candidate_bg = (light_enough & (alpha > 0)).astype(np.uint8) * 255
+    flood = cv2.copyMakeBorder(candidate_bg, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255)
+    flood_mask = np.zeros((flood.shape[0] + 2, flood.shape[1] + 2), dtype=np.uint8)
+    cv2.floodFill(flood, flood_mask, (0, 0), 128)
+    connected_bg = flood[1:-1, 1:-1] == 128
+
+    alpha[connected_bg] = 0
+
+    if softness > 0 and np.any(connected_bg):
+        foreground = (~connected_bg).astype(np.uint8)
+        dist_from_bg = cv2.distanceTransform(foreground, cv2.DIST_L2, 3)
+        fade_zone = (~connected_bg) & light_enough & (dist_from_bg > 0) & (dist_from_bg < softness)
+        if np.any(fade_zone):
+            factor = np.clip(dist_from_bg[fade_zone] / max(1, softness), 0.0, 1.0)
+            alpha[fade_zone] *= factor
+
+    arr[:, :, 3] = np.clip(alpha, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, "RGBA")
+
+
 def crop_transparent(img: Image.Image) -> Image.Image:
     bbox = img.getbbox()
     return img.crop(bbox) if bbox else img
@@ -186,7 +221,7 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
         with Image.open(file) as im:
             im = ImageOps.exif_transpose(im)
             im = normalize_to_100dpi(im)
-            im = remove_white(im, threshold=threshold, softness=18)
+            im = remove_background(im, threshold=threshold, softness=18)
             im = crop_transparent(im)
 
             if im.mode != "RGBA":
@@ -240,9 +275,9 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
 
 
 def _get_cache_key(file: Path, threshold: int) -> str:
-    # Gerar um hash baseado no caminho, tamanho, data e threshold (v2 - imagens limpas)
+    # Gerar um hash baseado no caminho, tamanho, data e threshold (v3 - fundo por flood fill)
     stats = file.stat()
-    data = f"v2|{file.absolute()}|{stats.st_size}|{stats.st_mtime}|{threshold}"
+    data = f"v3|{file.absolute()}|{stats.st_size}|{stats.st_mtime}|{threshold}"
     return hashlib.md5(data.encode()).hexdigest()
 
 

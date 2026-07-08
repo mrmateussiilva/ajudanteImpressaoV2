@@ -93,6 +93,14 @@ def run_roll_packer(
     if debug_fn is not None:
         debug_fn(image_items, profile["debug_limit"])
 
+    status_fn("Gerando debug do recorte...")
+    debug_cut_path = request.folder / f"{Path(request.output_name).stem}_debug_recorte_contornos.png"
+    try:
+        _save_processed_contour_debug(image_items=image_items, output_path=debug_cut_path)
+        log_fn(f"    ✓ Debug do recorte salvo: {debug_cut_path.name}\n", "ok")
+    except Exception as exc:
+        log_fn(f"  ✗ Erro ao gerar debug do recorte: {exc}\n", "err")
+
     # Aplicar rótulos dinâmicos de categoria nas imagens limpas antes de passar para o packer
     from concurrent.futures import ThreadPoolExecutor
     from functools import partial
@@ -360,6 +368,74 @@ def _generate_roll_dxf(
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(output_dxf_path))
     return output_dxf_path
+
+
+def _save_processed_contour_debug(
+    image_items: list[dict],
+    output_path: Path,
+    thumb_size: int = 360,
+    columns: int = 4,
+) -> None:
+    """Salva uma prancha para auditar o recorte alfa antes do encaixe."""
+    import cv2
+    import math
+    import numpy as np
+    from PIL import ImageDraw, ImageFont
+
+    if not image_items:
+        return
+
+    cell_w = thumb_size
+    cell_h = thumb_size + 42
+    rows = math.ceil(len(image_items) / columns)
+    sheet = Image.new("RGB", (columns * cell_w, rows * cell_h), (32, 32, 38))
+    font = ImageFont.load_default()
+
+    checker = Image.new("RGB", (thumb_size, thumb_size), (238, 238, 238))
+    draw_checker = ImageDraw.Draw(checker)
+    block = 18
+    for yy in range(0, thumb_size, block):
+        for xx in range(0, thumb_size, block):
+            if (xx // block + yy // block) % 2:
+                draw_checker.rectangle((xx, yy, xx + block - 1, yy + block - 1), fill=(204, 204, 204))
+
+    for idx, item in enumerate(image_items):
+        img = item["image"]
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+
+        scale = min((thumb_size - 24) / max(1, img.width), (thumb_size - 24) / max(1, img.height), 1.0)
+        preview_w = max(1, int(round(img.width * scale)))
+        preview_h = max(1, int(round(img.height * scale)))
+        preview = img.resize((preview_w, preview_h), Image.Resampling.LANCZOS)
+
+        cell = checker.copy()
+        px = (thumb_size - preview_w) // 2
+        py = (thumb_size - preview_h) // 2
+        cell.paste(preview, (px, py), preview.getchannel("A"))
+
+        alpha = np.array(preview.getchannel("A"), dtype=np.uint8)
+        mask = (alpha > 5).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            cell_arr = np.array(cell)
+            offset = np.array([[[px, py]]], dtype=np.int32)
+            cv2.drawContours(cell_arr, [cnt + offset for cnt in contours], -1, (255, 0, 0), 2)
+            cell = Image.fromarray(cell_arr)
+
+        col = idx % columns
+        row = idx // columns
+        x = col * cell_w
+        y = row * cell_h
+        sheet.paste(cell, (x, y))
+
+        draw = ImageDraw.Draw(sheet)
+        name = str(item.get("name", f"imagem_{idx + 1}"))
+        draw.text((x + 10, y + thumb_size + 8), f"{idx + 1}. {name[:38]}", fill=(245, 245, 245), font=font)
+        draw.text((x + 10, y + thumb_size + 24), f"{img.width}x{img.height}px", fill=(180, 180, 190), font=font)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(str(output_path), format="PNG")
 
 
 def _save_debug_contours(

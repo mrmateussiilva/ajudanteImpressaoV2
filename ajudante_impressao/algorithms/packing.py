@@ -68,12 +68,10 @@ def _prepare_mask_variants(
     # Imagens retrato já são ideais para o rolo vertical. Rotacioná-las
     # aumentaria a largura consumida, bloqueando o rolo e gerando espaços vazios.
     if allow_rotate and img.width > img.height:
-        if performance_mode == "quality":
-            angle_candidates.extend([90, 270, 45, 135, 225, 315])
-        elif performance_mode == "balanced":
-            angle_candidates.extend([90, 270])
-        else:  # fast — só 90
+        if performance_mode == "fast":
             angle_candidates.extend([90])
+        else:
+            angle_candidates.extend([90, 270])
 
     variants: list[MaskVariant] = []
     seen: set[tuple[int, int, int]] = set()
@@ -320,13 +318,15 @@ def _find_valid_positions_nfp(
     search_h: int,
     step: int = 8,
     spacing: int = 0,
+    scale: int = 8,
     top_k: int = 128,
+    raster_search: bool = True,
 ) -> list[tuple[int, int]]:
-    """Busca guiada por fronteira e refinamento local.
+    """Busca candidatos por fronteira e, quando habilitado, por NFP raster.
 
-    A versão anterior fazia uma busca raster ampla com matchTemplate sobre
-    grande parte do canvas. Aqui a ideia é preservar a compactação, mas gerar
-    bem menos candidatos por peça.
+    A fronteira é barata e captura os encaixes óbvios. O NFP raster coarse-to-fine
+    volta a varrer a área livre do canvas para encontrar vãos internos que a
+    fronteira sozinha não enxerga.
     """
     h_m, w_m = mask.shape
     if h_m <= 0 or w_m <= 0:
@@ -335,9 +335,12 @@ def _find_valid_positions_nfp(
     if not occupancy[:search_h, :].any():
         return [(margin, margin)]
 
-    # Candidatos principais vindos da fronteira atual do layout.
+    results: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+
     placed: list[PackedPiece] = getattr(_find_valid_positions_nfp, "_placed_cache", [])  # type: ignore[attr-defined]
-    candidates = _collect_frontier_candidates(
+    frontier_limit = top_k if not raster_search else max(32, min(96, top_k // 3))
+    frontier_candidates = _collect_frontier_candidates(
         occupancy=occupancy,
         placed=placed,
         margin=margin,
@@ -347,15 +350,10 @@ def _find_valid_positions_nfp(
         piece_h=h_m,
         step=step,
         spacing=spacing,
-        limit=top_k,
+        limit=frontier_limit,
     )
 
-    if not candidates:
-        candidates = [(margin, max(margin, search_h - h_m))]
-
-    results: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
-    for fx, fy in candidates:
+    for fx, fy in frontier_candidates:
         if (fx, fy) in seen:
             continue
         seen.add((fx, fy))
@@ -363,6 +361,83 @@ def _find_valid_positions_nfp(
             continue
         if not _collides(occupancy, mask, fx, fy, search_h):
             results.append((fx, fy))
+
+    if not raster_search:
+        return results[:top_k] if results else [(margin, search_h - h_m)]
+
+    h_c = max(2, search_h // scale)
+    w_c = max(2, max_width // scale)
+
+    occ_slice_f = occupancy[:search_h, :].astype(np.float32)
+    occ_small = cv2.resize(occ_slice_f, (w_c, h_c), interpolation=cv2.INTER_AREA)
+    free_c = 1.0 - occ_small.clip(0.0, 1.0)
+
+    mask_w_c = max(1, w_m // scale)
+    mask_h_c = max(1, h_m // scale)
+    mask_small = cv2.resize(mask.astype(np.float32), (mask_w_c, mask_h_c), interpolation=cv2.INTER_AREA)
+
+    if mask_small.shape[0] >= free_c.shape[0] or mask_small.shape[1] >= free_c.shape[1]:
+        return results[:top_k] if results else [(margin, search_h - h_m)]
+
+    mask_sum = float(mask_small.sum())
+    if mask_sum < 1.0:
+        return results[:top_k] if results else [(margin, margin)]
+
+    res = cv2.matchTemplate(free_c, mask_small, cv2.TM_CCORR)
+    res_norm = res / mask_sum
+
+    ys_c = xs_c = np.array([], dtype=np.int64)
+    for thresh in (0.995, 0.97, 0.90, 0.75, 0.50, 0.20):
+        ys_c, xs_c = np.where(res_norm >= thresh)
+        if len(ys_c) > 0:
+            break
+
+    if len(ys_c) == 0:
+        return results[:top_k] if results else [(margin, search_h - h_m)]
+
+    margin_c = max(0, margin // scale)
+    x_limit_c = max(1, (max_width - margin - w_m) // scale)
+    valid = (ys_c >= margin_c) & (xs_c >= margin_c) & (xs_c <= x_limit_c)
+    ys_c, xs_c = ys_c[valid], xs_c[valid]
+
+    if len(ys_c) == 0:
+        return results[:top_k] if results else [(margin, search_h - h_m)]
+
+    order = np.lexsort((xs_c, ys_c))
+    candidates_coarse: list[tuple[int, int]] = []
+    seen_cells: set[tuple[int, int]] = set()
+    for cx, cy in zip(xs_c[order].tolist(), ys_c[order].tolist()):
+        cell = (cx // 4, cy // 4)
+        if cell in seen_cells:
+            continue
+        seen_cells.add(cell)
+        candidates_coarse.append((cx, cy))
+        if len(candidates_coarse) >= 2048:
+            break
+
+    fine_step = max(1, scale // 2)
+    coarse_evaluated = 0
+    for cx_c, cy_c in candidates_coarse:
+        coarse_evaluated += 1
+        base_y = cy_c * scale
+        base_x = cx_c * scale
+
+        for dy in range(-scale, scale + 1, fine_step):
+            for dx in range(-scale, scale + 1, fine_step):
+                fy = base_y + dy
+                fx = base_x + dx
+                if fy < margin or fx < margin or fx + w_m > max_width - margin or fy + h_m > search_h:
+                    continue
+                if (fx, fy) in seen:
+                    continue
+                seen.add((fx, fy))
+                if not _collides(occupancy, mask, fx, fy, search_h):
+                    results.append((fx, fy))
+                    if len(results) >= top_k:
+                        return results
+
+        if coarse_evaluated >= 1024:
+            break
 
     return results if results else [(margin, search_h - h_m)]
 
@@ -449,7 +524,9 @@ def pack_images_masked(
     max_y_used = margin
     stamp_kernel = _build_stamp_kernel(spacing) if spacing > 0 else None
     total_count = len(prepared)
-    candidate_limit = 96 if performance_mode == "quality" else (72 if performance_mode == "balanced" else 48)
+    scale_factor = 16 if performance_mode == "fast" else 8
+    candidate_limit = 64 if performance_mode == "fast" else 192
+    raster_search = performance_mode != "fast"
 
     for processed_count, piece in enumerate(prepared):
         if progress_cb:
@@ -480,14 +557,17 @@ def pack_images_masked(
                 search_h,
                 step=step,
                 spacing=spacing,
+                scale=scale_factor,
                 top_k=candidate_limit,
+                raster_search=raster_search,
             )
 
             for fx, fy in valid_positions:
                 score = _score_candidate(mask, fx, fy, max_width, margin, max_y_used, variant.area)
                 contact = _score_contact(occupancy, mask, fx, fy, spacing)
+                angle_penalty = 0 if variant.angle in (0, 90, 270) else 1
                 # Minimiza altura, maximiza contato entre peças
-                final_score = (score[0], score[1], -contact, score[2], score[3], score[4], score[5])
+                final_score = (score[0], score[1], angle_penalty, -contact, score[2], score[3], score[4], score[5])
 
                 if best_choice is None or final_score < best_choice["score"]:
                     best_choice = {
@@ -511,7 +591,8 @@ def pack_images_masked(
                 if (rx, ry) != (best_choice["x"], best_choice["y"]):
                     score = _score_candidate(mask, rx, ry, max_width, margin, max_y_used, variant.area)
                     contact = _score_contact(occupancy, mask, rx, ry, spacing)
-                    refined_score = (score[0], score[1], -contact, score[2], score[3], score[4], score[5])
+                    angle_penalty = 0 if variant.angle in (0, 90, 270) else 1
+                    refined_score = (score[0], score[1], angle_penalty, -contact, score[2], score[3], score[4], score[5])
                     if refined_score < best_choice["score"]:
                         best_choice = {
                             "image": img,
