@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -51,6 +52,11 @@ class RollerPackResult:
     final_image: Image.Image
     final_jpeg: Image.Image
     image_items: list[dict]
+    yield_pct: float = 0.0
+    waste_pct: float = 0.0
+    useful_area_m2: float = 0.0
+    total_area_m2: float = 0.0
+    elapsed_seconds: float = 0.0
     dxf_path: Path | None = None
     packed: list[tuple[Image.Image, int, int]] | None = None
 
@@ -62,6 +68,7 @@ def run_roll_packer(
     debug_fn: DebugCallback | None = None,
     image_items: list[dict] | None = None,
 ) -> RollerPackResult | None:
+    t_start = time.time()
     profile = PERFORMANCE_PROFILES.get(request.performance_mode, PERFORMANCE_PROFILES["balanced"])
     roll_px = cm_to_px(request.largura_cm)
     spacing_px = cm_to_px(request.espaco_cm)
@@ -125,7 +132,7 @@ def run_roll_packer(
         if current % 5 == 0 or current == total:
             log_fn(f"    Encaixando imagem {current} de {total}...\n", "muted")
 
-    packed, final_w, final_h = pack_images_masked(
+    pack_res = pack_images_masked(
         images=images,
         max_width=roll_px,
         spacing=spacing_px,
@@ -136,10 +143,32 @@ def run_roll_packer(
         performance_mode=request.performance_mode
     )
 
+    if len(pack_res) == 4:
+        packed, final_w, final_h, useful_area_px = pack_res
+    else:
+        packed, final_w, final_h = pack_res
+        useful_area_px = 0
+
+    total_canvas_area_px = max(1, final_w * final_h)
+    yield_pct = round((useful_area_px / total_canvas_area_px) * 100.0, 1)
+    waste_pct = round(max(0.0, 100.0 - yield_pct), 1)
+
+    # Converter px -> cm -> m² (100 px = 2.54 cm -> 1 px = 0.0254 cm)
+    useful_area_cm2 = useful_area_px * (0.0254 ** 2)
+    total_area_cm2 = (final_w * 0.0254) * (final_h * 0.0254)
+    useful_area_m2 = round(useful_area_cm2 / 10000.0, 3)
+    total_area_m2 = round(total_area_cm2 / 10000.0, 3)
+
     log_fn(
         f"  Canvas final: {final_w}×{final_h}px  ({final_w / 100 * 2.54:.1f}cm × {final_h / 100 * 2.54:.1f}cm)\n",
         "info",
     )
+    log_fn(f"\n{'─' * 58}\n", "muted")
+    log_fn(f"📊  RELATÓRIO DE APROVEITAMENTO E DESPERDÍCIO:\n", "info")
+    log_fn(f"    • Aproveitamento Útil:  {yield_pct}%\n", "ok")
+    log_fn(f"    • Sobra / Desperdício:  {waste_pct}%\n", "warn" if waste_pct > 30 else "info")
+    log_fn(f"    • Área Total Consumida: {total_area_m2} m²  (Útil: {useful_area_m2} m²)\n", "muted")
+    log_fn(f"{'─' * 58}\n\n", "muted")
 
     status_fn("Gerando imagem final...")
     log_fn("\nGerando imagem final...\n", "info")
@@ -208,7 +237,9 @@ def run_roll_packer(
     except Exception as exc:
         log_fn(f"  ✗ Erro ao gerar debug de contornos: {exc}\n", "err")
 
-    log_fn(f"    {len(packed)} imagens posicionadas.\n", "ok")
+    elapsed_sec = round(time.time() - t_start, 2)
+    log_fn(f"    ✓ {len(packed)} imagens posicionadas com sucesso.\n", "ok")
+    log_fn(f"⏱  Tempo Total de Geração: {elapsed_sec:.2f} segundos\n", "ok")
     log_fn(f"\n{'─' * 58}\n", "muted")
 
     return RollerPackResult(
@@ -220,6 +251,11 @@ def run_roll_packer(
         final_image=final,
         final_jpeg=final_jpeg,
         image_items=image_items,
+        yield_pct=yield_pct,
+        waste_pct=waste_pct,
+        useful_area_m2=useful_area_m2,
+        total_area_m2=total_area_m2,
+        elapsed_seconds=elapsed_sec,
         dxf_path=dxf_path,
         packed=packed,
     )

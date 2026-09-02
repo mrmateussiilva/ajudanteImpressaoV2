@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -531,7 +532,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             return
 
         self._set_status(f"Concluido - {result.output_path.name}")
-        self._show_preview(result.final_image)
+        self._show_preview(result.final_image, result=result)
         self._set_running(False)
 
     def _handle_failed(self, message: str) -> None:
@@ -548,7 +549,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._worker = None
         self._worker_thread = None
 
-    def _show_preview(self, img: Image.Image) -> None:
+    def _show_preview(self, img: Image.Image, result: RollerPackResult | None = None) -> None:
         max_w = 760
         ratio = min(1.0, max_w / img.width) if img.width > 0 else 1.0
         thumb = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.Resampling.LANCZOS)
@@ -568,6 +569,46 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._clear_layout(self.preview_layout)
         self.preview_layout.addWidget(self.preview_label)
         self.preview_layout.addWidget(size_label)
+
+        if result is not None and result.yield_pct > 0:
+            stats_card = QFrame()
+            stats_card.setObjectName("fieldCard")
+            stats_layout = QHBoxLayout(stats_card)
+            stats_layout.setContentsMargins(14, 10, 14, 10)
+            stats_layout.setSpacing(12)
+            stats_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            yield_lbl = QLabel(f"✓ {result.yield_pct}% Aproveitamento Útil")
+            yield_lbl.setStyleSheet(
+                "background: rgba(166, 227, 161, 0.15); color: #A6E3A1; border: 1px solid #A6E3A1; "
+                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+            )
+
+            waste_color = "#F38BA8" if result.waste_pct > 30 else "#F9E2AF"
+            waste_lbl = QLabel(f"⚠ {result.waste_pct}% Sobra / Desperdício")
+            waste_lbl.setStyleSheet(
+                f"background: rgba(243, 139, 168, 0.15); color: {waste_color}; border: 1px solid {waste_color}; "
+                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+            )
+
+            area_lbl = QLabel(f"📐 {result.total_area_m2} m² Área Total")
+            area_lbl.setStyleSheet(
+                "background: rgba(59, 130, 246, 0.15); color: #3B82F6; border: 1px solid #3B82F6; "
+                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+            )
+
+            time_lbl = QLabel(f"⏱ {result.elapsed_seconds:.1f}s Tempo Geração")
+            time_lbl.setStyleSheet(
+                "background: rgba(195, 160, 245, 0.15); color: #C3A0F5; border: 1px solid #C3A0F5; "
+                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+            )
+
+            stats_layout.addWidget(yield_lbl)
+            stats_layout.addWidget(waste_lbl)
+            stats_layout.addWidget(area_lbl)
+            stats_layout.addWidget(time_lbl)
+            self.preview_layout.addWidget(stats_card)
+
         self.tabs.setCurrentIndex(1)
 
     def _show_debug_images(self, payload: DebugPayload) -> None:
@@ -575,8 +616,11 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._debug_pixmaps.clear()
         visible_items = payload.image_items if payload.debug_limit <= 0 else payload.image_items[: payload.debug_limit]
         for item in visible_items:
-            preview = item["image"].copy()
-            preview.thumbnail((200, 200), Image.Resampling.LANCZOS)
+            if "thumbnail" in item:
+                preview = item["thumbnail"]
+            else:
+                preview = item["image"].copy()
+                preview.thumbnail((200, 200), Image.Resampling.BILINEAR)
             pixmap = pil_to_qpixmap(_checkerboard_image(preview, block=16))
             self._debug_pixmaps.append(pixmap)
 
@@ -750,83 +794,173 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             w_input.editingFinished.connect(make_w_handler())
             h_input.editingFinished.connect(make_h_handler())
 
-            # Informações de Inteligência (Tipo e Qualidade)
-            info_layout = QHBoxLayout()
-            info_layout.setSpacing(4)
-            
-            # Dropdown interativo para Tipo de Produção (Categoria)
-            from ...algorithms.classifier import get_prod_classifier
-            
+            # Informações de Inteligência (Material, Confiança e Qualidade Interativa)
+            from ...algorithms.classifier import get_prod_classifier, get_quality_classifier, feed_back_to_training
+            from ...algorithms.image_ops import update_image_cache_meta
+
+            prod_cls = get_prod_classifier()
+            qual_cls = get_quality_classifier()
+
             try:
-                available_categories = list(get_prod_classifier().category_names)
+                available_categories = list(prod_cls.category_names)
             except Exception:
                 available_categories = []
-                
-            default_cats = ["3mm sp", "6mm cp", "poliondas"]
+
+            default_cats = ["3mm sp", "6mm cp", "poliondas", "adesivo", "lona"]
             for default_cat in default_cats:
                 if default_cat not in available_categories:
                     available_categories.append(default_cat)
-                    
+
             if "N/A" not in available_categories:
                 available_categories.append("N/A")
-                
+
             current_cat = item.get("category", "N/A")
             if current_cat not in available_categories:
                 available_categories.append(current_cat)
-                
+
             available_categories.sort(key=lambda x: (x == "N/A", x.lower()))
-            
+            available_categories.append("+ Nova Categoria...")
+
+            # Linha 1: Dropdown de Categoria + Badge de Confiança
+            row1 = QHBoxLayout()
+            row1.setSpacing(4)
+
             cat_combo = QComboBox()
             cat_combo.addItems(available_categories)
             cat_combo.setCurrentText(current_cat)
             cat_combo.setStyleSheet(
                 "QComboBox {"
-                "    background: #45475A;"
-                "    color: #BAC2DE;"
+                "    background: #313244;"
+                "    color: #CDD6F4;"
                 "    border-radius: 4px;"
                 "    padding: 2px 6px;"
                 "    font-size: 10px;"
                 "    font-weight: bold;"
-                "    border: 1px solid rgba(255, 255, 255, 0.1);"
-                "}"
-                "QComboBox::drop-down {"
-                "    border: none;"
-                "}"
-                "QComboBox QAbstractItemView {"
-                "    background-color: #313244;"
-                "    color: #CDD6F4;"
-                "    selection-background-color: #585b70;"
                 "    border: 1px solid rgba(255, 255, 255, 0.15);"
                 "}"
+                "QComboBox::drop-down { border: none; }"
+                "QComboBox QAbstractItemView {"
+                "    background-color: #1e1e2e;"
+                "    color: #CDD6F4;"
+                "    selection-background-color: #45475a;"
+                "}"
             )
-            
-            def make_change_handler(target_item=item):
-                def on_change(text):
+
+            # Badge de Confiança
+            conf_val = float(item.get("category_confidence", 0.0))
+            if conf_val >= 80:
+                conf_bg = "#22c55e"
+                conf_fg = "#ffffff"
+            elif conf_val >= 50:
+                conf_bg = "#eab308"
+                conf_fg = "#000000"
+            elif conf_val > 0:
+                conf_bg = "#ef4444"
+                conf_fg = "#ffffff"
+            else:
+                conf_bg = "#45475a"
+                conf_fg = "#bac2de"
+
+            conf_badge = QLabel(f"{conf_val:.0f}%" if conf_val > 0 else "--")
+            conf_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            conf_badge.setFixedWidth(34)
+            conf_badge.setStyleSheet(
+                f"background: {conf_bg}; color: {conf_fg}; border-radius: 4px; font-size: 9px; font-weight: 800; padding: 2px;"
+            )
+            conf_tooltip = f"Confiança da IA: {conf_val:.1f}%\n"
+            if item.get("features_summary"):
+                fs = item["features_summary"]
+                conf_tooltip += f"Dimensão: {fs.get('width_cm', 0):.1f}x{fs.get('height_cm', 0):.1f}cm\nFill Ratio: {fs.get('fill_ratio', 0):.1f}%"
+            conf_badge.setToolTip(conf_tooltip)
+
+            row1.addWidget(cat_combo, 1)
+            row1.addWidget(conf_badge, 0)
+            card_layout.addLayout(row1)
+
+            # Linha 2: Dropdown de Qualidade Interativo + Label de Aprendizado
+            row2 = QHBoxLayout()
+            row2.setSpacing(4)
+
+            qual_combo = QComboBox()
+            qual_combo.addItems(["Boa", "Aceitável", "Ruim"])
+            current_qual_raw = item.get("quality", "boa").lower()
+            if "ruim" in current_qual_raw:
+                qual_combo.setCurrentText("Ruim")
+            elif "aceit" in current_qual_raw:
+                qual_combo.setCurrentText("Aceitável")
+            else:
+                qual_combo.setCurrentText("Boa")
+
+            def _apply_qual_style(combo: QComboBox, text: str):
+                t_low = text.lower()
+                color = "#A6E3A1" if "boa" in t_low else "#F9E2AF" if "aceit" in t_low else "#F38BA8"
+                combo.setStyleSheet(
+                    f"QComboBox {{ background: #313244; color: {color}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {color}; }}"
+                    "QComboBox::drop-down { border: none; }"
+                    "QComboBox QAbstractItemView { background-color: #1e1e2e; color: #cdd6f4; selection-background-color: #45475a; }"
+                )
+
+            _apply_qual_style(qual_combo, qual_combo.currentText())
+
+            learn_status_lbl = QLabel("")
+            learn_status_lbl.setStyleSheet("font-size: 9px; color: #a6e3a1; font-weight: bold;")
+            learn_status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            # Handlers de feedback em tempo real
+            def make_cat_handler(target_item=item, combo=cat_combo, badge=conf_badge, status_lbl=learn_status_lbl):
+                def on_cat_change(text):
+                    if text == "+ Nova Categoria...":
+                        new_cat, ok = QInputDialog.getText(self, "Nova Categoria", "Digite o nome da nova categoria:")
+                        if ok and new_cat.strip():
+                            clean_cat = new_cat.strip()
+                            prod_cls.add_category(clean_cat)
+                            combo.blockSignals(True)
+                            combo.insertItem(combo.count() - 1, clean_cat)
+                            combo.setCurrentText(clean_cat)
+                            combo.blockSignals(False)
+                            text = clean_cat
+                        else:
+                            combo.blockSignals(True)
+                            combo.setCurrentText(target_item.get("category", "N/A"))
+                            combo.blockSignals(False)
+                            return
+
                     target_item["category"] = text
+                    badge.setText("100%")
+                    badge.setStyleSheet("background: #22c55e; color: white; border-radius: 4px; font-size: 9px; font-weight: 800; padding: 2px;")
+                    status_lbl.setText("🧠 Aprendido!")
                     try:
-                        from ...algorithms.image_ops import update_image_cache_meta
-                        from ...algorithms.classifier import feed_back_to_training
                         thresh = int(self.threshold_input.text())
                         if self._folder:
                             update_image_cache_meta(self._folder, target_item["name"], thresh, {"category": text})
                             feed_back_to_training(self._folder, target_item["name"], thresh, category=text)
                     except Exception:
                         pass
-                return on_change
-                
-            cat_combo.currentTextChanged.connect(make_change_handler(item))
-            info_layout.addWidget(cat_combo, 1)
+                return on_cat_change
 
-            qual_val = item.get("quality", "N/A")
-            qual_color = "#A6E3A1" if qual_val == "boa" else "#F9E2AF" if qual_val == "aceitavel" else "#F38BA8" if qual_val == "ruim" else "#BAC2DE"
-            qual_lbl = QLabel(f"Q: {qual_val.upper()}")
-            qual_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            qual_lbl.setStyleSheet(f"background: #45475A; color: {qual_color}; border-radius: 4px; padding: 2px 4px; font-size: 10px; font-weight: bold;")
-            info_layout.addWidget(qual_lbl)
-            
-            card_layout.addLayout(info_layout)
+            def make_qual_handler(target_item=item, combo=qual_combo, status_lbl=learn_status_lbl):
+                def on_qual_change(text):
+                    _apply_qual_style(combo, text)
+                    norm_qual = "boa" if text == "Boa" else "aceitavel" if text == "Aceitável" else "ruim"
+                    target_item["quality"] = norm_qual
+                    status_lbl.setText("🧠 Aprendido!")
+                    try:
+                        thresh = int(self.threshold_input.text())
+                        if self._folder:
+                            update_image_cache_meta(self._folder, target_item["name"], thresh, {"quality": norm_qual})
+                            feed_back_to_training(self._folder, target_item["name"], thresh, quality=norm_qual)
+                    except Exception:
+                        pass
+                return on_qual_change
 
-            card.setFixedSize(220, 290) # Aumentado um pouco para caber as infos
+            cat_combo.currentTextChanged.connect(make_cat_handler())
+            qual_combo.currentTextChanged.connect(make_qual_handler())
+
+            row2.addWidget(qual_combo, 1)
+            row2.addWidget(learn_status_lbl, 1)
+            card_layout.addLayout(row2)
+
+            card.setFixedSize(220, 310)
 
             list_item = QListWidgetItem(self.debug_list)
             list_item.setSizeHint(card.size())

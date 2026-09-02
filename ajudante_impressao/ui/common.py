@@ -35,21 +35,29 @@ class ScreenScaffold:
         layout.setSpacing(14)
         return frame, layout
 
-    def build_sidebar_header(self, title_text: str, subtitle_text: str) -> QFrame:
+    def build_sidebar_header(self, title_text: str, subtitle_text: str, version_text: str = "v1.0.1") -> QFrame:
         header = QFrame()
         header.setObjectName("panel")
         header_layout = QVBoxLayout(header)
         header_layout.setContentsMargins(16, 16, 16, 16)
-        header_layout.setSpacing(4)
+        header_layout.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
 
         title = QLabel(title_text)
         title.setObjectName("title")
+        title_row.addWidget(title, 1)
+
+        version_badge = QLabel(version_text)
+        version_badge.setObjectName("versionBadge")
+        title_row.addWidget(version_badge, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         subtitle = QLabel(subtitle_text)
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
 
-        header_layout.addWidget(title)
+        header_layout.addLayout(title_row)
         header_layout.addWidget(subtitle)
         return header
 

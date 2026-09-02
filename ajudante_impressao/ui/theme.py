@@ -69,6 +69,16 @@ def build_stylesheet(theme_name: str) -> str:
         font-weight: 400;
     }}
     
+    QLabel#versionBadge {{
+        background: {colors['card_alt']};
+        color: {colors['accent']};
+        font-size: 11px;
+        font-weight: 700;
+        border: 1px solid {colors['accent']};
+        border-radius: 6px;
+        padding: 2px 7px;
+    }}
+    
     QLabel#section {{
         color: {colors['text']};
         font-size: 13px;

@@ -45,7 +45,6 @@ def add_label_to_image(
         date_str   -- data de envio opcional; se fornecida, é exibida em uma segunda linha
         text_color -- cor RGBA do texto (padrão preto); o fundo do box é sempre branco
     """
-    # Monta o texto final (categoria + data opcional na linha de baixo)
     label_lines = [text]
     if date_str.strip():
         label_lines.append(f"Envio: {date_str.strip()}")
@@ -58,14 +57,12 @@ def add_label_to_image(
 
     font = _get_font(font_size)
 
-    # Calcular tamanho do bloco de texto (suporte a múltiplas linhas)
     text_bbox = _temp_draw.textbbox((0, 0), full_text, font=font)
     tw = text_bbox[2] - text_bbox[0]
     th = text_bbox[3] - text_bbox[1]
 
     if position.startswith("external_"):
         padding_h = cm_to_px(1.0)
-        # Se tiver duas linhas, expande a margem extra para acomodar
         if date_str.strip():
             padding_h = max(padding_h, th + 20)
         new_img = ImageOps.expand(img, border=(0, 0, 0, padding_h), fill=(0, 0, 0, 0))
@@ -75,10 +72,10 @@ def add_label_to_image(
             x = new_img.width - tw - 15
         elif position == "external_bottom_left":
             x = 15
-        else:  # external_bottom_center
+        else:
             x = (new_img.width - tw) // 2
 
-    else:  # overlay_
+    else:
         new_img = img.copy()
         margin_offset = 12
         if position == "overlay_bottom_right":
@@ -93,12 +90,11 @@ def add_label_to_image(
         elif position == "overlay_top_left":
             x = margin_offset
             y = margin_offset
-        else:  # fallback
+        else:
             x = new_img.width - tw - margin_offset
             y = new_img.height - th - margin_offset
 
     draw = ImageDraw.Draw(new_img)
-    # Fundo branco sólido para garantir legibilidade independente da cor do texto
     draw.rectangle([x - 8, y - 5, x + tw + 8, y + th + 8], fill=(255, 255, 255, 255))
     draw.text((x, y), full_text, fill=text_color, font=font)
 
@@ -158,8 +154,6 @@ def remove_background(img: Image.Image, threshold: int = 245, softness: int = 18
     distance_to_white = np.max(np.abs(255 - rgb), axis=2)
     light_enough = distance_to_white <= white_tolerance
 
-    # Fundo só é removido se estiver conectado ao exterior da imagem. Isso evita
-    # apagar áreas brancas internas, textos claros e detalhes da própria arte.
     candidate_bg = (light_enough & (alpha > 0)).astype(np.uint8) * 255
     flood = cv2.copyMakeBorder(candidate_bg, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255)
     flood_mask = np.zeros((flood.shape[0] + 2, flood.shape[1] + 2), dtype=np.uint8)
@@ -181,13 +175,18 @@ def remove_background(img: Image.Image, threshold: int = 245, softness: int = 18
 
 
 def crop_transparent(img: Image.Image) -> Image.Image:
-    bbox = img.getbbox()
-    return img.crop(bbox) if bbox else img
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    alpha = np.array(img.getchannel("A"), dtype=np.uint8)
+    non_zero = cv2.findNonZero(alpha)
+    if non_zero is None:
+        return img
+    x, y, w, h = cv2.boundingRect(non_zero)
+    return img.crop((x, y, x + w, y + h))
 
 
 def trim_empty_borders(img: Image.Image) -> Image.Image:
-    bbox = img.getbbox()
-    return img.crop(bbox) if bbox else img
+    return crop_transparent(img)
 
 
 def resize_to_height(img: Image.Image, target_h: int) -> Image.Image:
@@ -233,29 +232,49 @@ def _process_single_image(file: Path, max_width_px: int, threshold: int) -> dict
                 resize_log = None
 
             im = crop_transparent(im)
-            
-            # Classificação automática baseada no treinamento (DEPOIS do crop final)
+
+            # Classificação automática enriquecida baseada em IA e regras de contexto
             try:
                 from .classifier import get_prod_classifier, get_quality_classifier
-                
+
                 prod_cls = get_prod_classifier()
-                category = prod_cls.classify(im, filename=file.name)
-                
+                prod_res = prod_cls.classify_with_details(im, filename=file.name)
+                category = prod_res.category
+                category_conf = prod_res.confidence_pct
+                category_alts = prod_res.alternatives
+
                 quality_cls = get_quality_classifier()
-                quality = quality_cls.classify(im, filename=file.name)
-                
-                class_log = f"  🏷️  Tipo: {category} | Qualidade: {quality}"
+                quality_res = quality_cls.classify_with_details(im, filename=file.name)
+                quality = quality_res.category
+                quality_conf = quality_res.confidence_pct
+
+                rule_tag = f" 📌[{prod_res.rule_matched}]" if prod_res.rule_matched else ""
+                class_log = (
+                    f"  🏷️ Tipo: {category} ({category_conf:.0f}%){rule_tag} | "
+                    f"★ Qualidade: {quality.upper()} ({quality_conf:.0f}%)"
+                )
             except Exception as e:
                 category = "N/A"
+                category_conf = 0.0
+                category_alts = []
                 quality = "N/A"
+                quality_conf = 0.0
+                prod_res = None
                 class_log = f"  ⚠  Erro na classificação: {e}"
 
             processed = im.copy()
+            thumb = processed.copy()
+            thumb.thumbnail((200, 200), Image.Resampling.BILINEAR)
             image_item = {
                 "name": file.name,
                 "category": category,
+                "category_confidence": category_conf,
+                "category_alternatives": category_alts,
                 "quality": quality,
+                "quality_confidence": quality_conf,
+                "features_summary": prod_res.details if prod_res else {},
                 "image": processed,
+                "thumbnail": thumb,
                 "width_px": processed.width,
                 "height_px": processed.height,
                 "width_cm": px_to_cm(processed.width),
@@ -319,43 +338,54 @@ def process_images(
 
     # Separar arquivos em "Cache" e "Para Processar"
     to_process = []
+    cached_count = 0
     for f in files:
         key = _get_cache_key(f, threshold)
         cache_file = cache_dir / f"{key}.png"
         meta_file = cache_dir / f"{key}.json"
-        
+        thumb_file = cache_dir / f"{key}_thumb.png"
+
         if cache_file.exists() and meta_file.exists():
             try:
                 import json
                 with open(meta_file, "r", encoding="utf-8") as j:
                     meta = json.load(j)
                 processed = Image.open(cache_file)
-                processed.load() # Garantir que foi lida
-                
-                # Se as dimensões no JSON forem diferentes do arquivo original do cache, redimensiona
+                processed.load()
+
                 if "width_px" in meta and (meta["width_px"] != processed.width or meta["height_px"] != processed.height):
                     processed = processed.resize((meta["width_px"], meta["height_px"]), Image.Resampling.LANCZOS)
-                
+
+                if thumb_file.exists():
+                    thumb = Image.open(thumb_file)
+                    thumb.load()
+                else:
+                    thumb = processed.copy()
+                    thumb.thumbnail((200, 200), Image.Resampling.BILINEAR)
+
                 imgs.append({
                     "name": f.name,
                     "image": processed,
+                    "thumbnail": thumb,
                     **meta
                 })
-                log_fn(f"  ⚡ {f.name} (Cache)\n", "muted")
+                cached_count += 1
             except Exception:
                 to_process.append(f)
         else:
             to_process.append(f)
 
+    if cached_count > 0:
+        log_fn(f"  ⚡ {cached_count} imagens carregadas instantaneamente do cache em disco.\n", "ok")
+
     if not to_process:
-        log_fn(f"\n  {len(imgs)} imagens carregadas do cache.", "ok")
         return imgs
 
     cpu_count = max(1, (os.cpu_count() or 1))
     worker_count = min(cpu_count, max_workers or 8)
-    log_fn(f"  Processamento multiprocesso: {worker_count} workers ({len(to_process)} novas)\n", "info")
+    log_fn(f"  Processamento multithread: {worker_count} workers ({len(to_process)} novas)\n", "info")
 
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         from functools import partial
         worker_fn = partial(_process_single_image, max_width_px=max_width_px, threshold=threshold)
         results = list(executor.map(worker_fn, to_process))
@@ -364,19 +394,19 @@ def process_images(
         item = result["item"]
         if item is not None:
             imgs.append(item)
-            # Salvar no cache
             try:
                 key = _get_cache_key(f, threshold)
                 item["image"].save(cache_dir / f"{key}.png", format="PNG")
+                if "thumbnail" in item:
+                    item["thumbnail"].save(cache_dir / f"{key}_thumb.png", format="PNG")
                 import json
-                meta = {k: v for k, v in item.items() if k != "image"}
+                meta = {k: v for k, v in item.items() if k not in ("image", "thumbnail")}
                 with open(cache_dir / f"{key}.json", "w", encoding="utf-8") as j:
                     json.dump(meta, j, ensure_ascii=False)
             except Exception:
                 pass
-
-        for message, level in zip(result["logs"], result["levels"]):
-            log_fn(f"{message}\n", level)
+        for log_msg, level in zip(result["logs"], result["levels"]):
+            log_fn(log_msg + "\n", level)
 
     log_fn(f"\n  {len(imgs)} imagens carregadas.", "info")
     return imgs

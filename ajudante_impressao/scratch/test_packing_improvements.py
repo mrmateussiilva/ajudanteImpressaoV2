@@ -7,13 +7,12 @@ from PIL import Image, ImageDraw
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from ajudante_impressao.algorithms.packing import pack_images_tight, pack_images_masked, build_canvas
+from ajudante_impressao.algorithms.packing import pack_images_masked, build_canvas
 
 def generate_mock_images():
     print("Gerando imagens de teste...")
     images = []
     
-    # 1. Círculos grandes e pequenos (formas com canal alfa transparente)
     sizes = [
         (300, 300, "circle"),
         (250, 400, "ellipse"),
@@ -33,7 +32,6 @@ def generate_mock_images():
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        # Desenha a forma com uma cor e canal alfa opaco
         color = ((i * 45) % 256, (i * 90) % 256, (i * 135) % 256, 255)
         if shape == "circle":
             r = min(w, h) // 2 - 5
@@ -47,8 +45,8 @@ def generate_mock_images():
         
     return images
 
-def test_algorithm(images, name, mode):
-    print(f"\n--- Testando algoritmo: {name} ({mode}) ---")
+def test_algorithm(images, name, perf_mode):
+    print(f"\n--- Testando algoritmo: {name} ({perf_mode}) ---")
     start_time = time.time()
     
     max_width = 1200
@@ -56,10 +54,8 @@ def test_algorithm(images, name, mode):
     margin = 20
     step = 8
     
-    if mode == "tight":
-        packed, w, h = pack_images_tight(images, max_width, spacing, margin, step, allow_rotate=True)
-    elif mode == "masked":
-        packed, w, h = pack_images_masked(images, max_width, spacing, margin, step, allow_rotate=True, performance_mode="balanced")
+    packed, w, h, useful_area = pack_images_masked(images, max_width, spacing, margin, step, allow_rotate=True, performance_mode=perf_mode)
+    yield_pct = (useful_area / (w * h)) * 100.0
         
     elapsed = time.time() - start_time
     print(f"Resultado {name}:")
@@ -68,10 +64,9 @@ def test_algorithm(images, name, mode):
     print(f"  Altura final: {h}px")
     print(f"  Tempo decorrido: {elapsed:.3f}s")
     
-    # Salvar resultado visual para inspeção
     if packed:
         canvas = build_canvas(packed, w, h)
-        output_name = f"test_result_{mode}.png"
+        output_name = f"test_result_{perf_mode}.png"
         output_path = os.path.join(os.path.dirname(__file__), output_name)
         canvas.save(output_path)
         print(f"  Imagem de resultado salva em: {output_name}")
@@ -81,16 +76,13 @@ def test_algorithm(images, name, mode):
 def main():
     images = generate_mock_images()
     
-    # Testar Tight
-    h_tight, t_tight = test_algorithm(images, "Tight", "tight")
-    
-    # Testar Masked
-    h_masked, t_masked = test_algorithm(images, "Masked", "masked")
+    h_fast, t_fast = test_algorithm(images, "Masked Fast", "fast")
+    h_balanced, t_balanced = test_algorithm(images, "Masked Balanced", "balanced")
     
     print("\n" + "="*40)
     print("Resumo do Benchmark Atual:")
-    print(f"  Tight  - Altura: {h_tight}px, Tempo: {t_tight:.3f}s")
-    print(f"  Masked - Altura: {h_masked}px, Tempo: {t_masked:.3f}s")
+    print(f"  Fast     - Altura: {h_fast}px, Tempo: {t_fast:.3f}s")
+    print(f"  Balanced - Altura: {h_balanced}px, Tempo: {t_balanced:.3f}s")
     print("="*40)
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QTabWidget,
@@ -14,7 +15,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .screens.classifier_manager import ClassifierManagerWidget
 from .screens.cut_panel import CutPanelWidget
+from .screens.hot_folder_screen import HotFolderWidget
 from .screens.roll_packer import RoloPackerWidget
 from .screens.totem_dxf import TotemDxfWidget
 from .theme import build_stylesheet
@@ -44,17 +47,29 @@ class AjudanteImpressaoQtApp(QMainWindow):
         header_layout.setContentsMargins(24, 18, 24, 18)
         header_layout.setSpacing(8)
 
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+
         title = QLabel("STUDIO DE IMPRESSAO")
         title.setObjectName("title")
-        subtitle = QLabel("Operacao focada em montagem de rolo e corte de painel")
+        title_row.addWidget(title)
+
+        version_badge = QLabel("v1.1.0")
+        version_badge.setObjectName("versionBadge")
+        title_row.addWidget(version_badge, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch()
+
+        subtitle = QLabel("Operação inteligente de montagem de rolos, corte de painel e agente autônomo")
         subtitle.setObjectName("subtitle")
 
-        header_layout.addWidget(title)
+        header_layout.addLayout(title_row)
         header_layout.addWidget(subtitle)
         layout.addWidget(header)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(RoloPackerWidget(), "Rolo Packer")
+        self.tabs.addTab(HotFolderWidget(), "🤖 Agente Monitorador")
+        self.tabs.addTab(ClassifierManagerWidget(), "🧠 Inteligência & Categorias")
         self.tabs.addTab(CutPanelWidget(), "Cut Panel")
         self.tabs.addTab(TotemDxfWidget(), "Totem DXF")
         layout.addWidget(self.tabs, 1)

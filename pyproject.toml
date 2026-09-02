@@ -1,7 +1,7 @@
 [project]
 name = "ajudanteimpressaov2"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.1.0"
+description = "Studio de Impressão - Packing inteligente, Cut Panel, Totem DXF e Agente Hot Folder"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -11,4 +11,5 @@ dependencies = [
     "opencv-python-headless>=4.10",
     "numba>=0.61.0",
     "ezdxf>=1.4.4",
+    "watchdog>=4.0.0",
 ]
