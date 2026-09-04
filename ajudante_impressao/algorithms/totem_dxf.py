@@ -111,23 +111,22 @@ def _get_dpi(img: Image.Image, dpi_override: Optional[int]) -> int:
     return 72  # fallback seguro para imagens sem DPI embutido
 
 
-def extract_contour(
+def extract_contour_pair(
     img: Image.Image,
     white_threshold: int = 245,
     softness: int = 18,
     simplify_eps: float = 2.0,
     close_gap_pct: float = 3.0,
     edge_sensitivity: int = 30,
-) -> Tuple[Optional[Contour], np.ndarray]:
+    bleed_mm: float = 0.0,
+    dpi: int = 72,
+) -> Tuple[Optional[Contour], Optional[Contour], np.ndarray]:
     """
-    Extrai o contorno externo UNIFICADO da silhueta da imagem.
+    Extrai o contorno base da arte e o contorno com sangria paralela exata.
 
-    Usa deteccao hibrida (bordas Canny + areas coloridas) para funcionar
-    corretamente tanto em arte colorida (Stitch) quanto em arte clara
-    (flores brancas, sketches, outlines).
-
-    Em seguida aplica fechamento morfologico agressivo para unir partes
-    separadas (orelhas, maos, petalas) em uma silhueta unica.
+    A sangria é calculada por DILATAÇÃO MORFOLÓGICA direta na máscara binária
+    (offset paralelo perfeito), preservando proporções, concavidades e detalhes
+    sem a distorção da antiga expansão radial por centroide.
 
     Args:
         img:              Imagem PIL de entrada
@@ -136,16 +135,19 @@ def extract_contour(
         simplify_eps:     Epsilon para simplificacao Douglas-Peucker (0-100)
         close_gap_pct:    % do menor lado usado como raio de fechamento
         edge_sensitivity: Sensibilidade do Canny (0-100, menor = mais bordas)
+        bleed_mm:         Sangria em milímetros para o contorno de corte
+        dpi:              Resolução para cálculo exato de pixels da sangria
 
     Retorna:
-        (contorno simplificado como ndarray shape (N,1,2), mascara de bordas)
-        Retorna (None, mask) se nenhum contorno for encontrado.
+        (base_contour, bleed_contour, mask)
+        - base_contour: contorno simplificado na borda exata da arte
+        - bleed_contour: contorno simplificado com a sangria uniforme aplicada
+        - mask: máscara de silhueta/bordas
     """
     # Mascara hibrida: bordas + areas coloridas
     mask = _get_silhouette_mask(img, white_threshold=white_threshold, edge_sensitivity=edge_sensitivity)
 
     # --- Fechamento morfologico AGRESSIVO ---
-    # Raio proporcional ao tamanho para fundir petalas/partes separadas
     min_side = min(mask.shape[0], mask.shape[1])
     close_radius = max(15, int(min_side * close_gap_pct / 100))
     kernel_size = 2 * close_radius + 1  # sempre impar
@@ -164,23 +166,79 @@ def extract_contour(
     holes = cv2.bitwise_not(flood)
     mask_filled = cv2.bitwise_or(mask_closed, holes)
 
-    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, mask
+    contours_base, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours_base:
+        return None, None, mask
 
-    # Pegar o contorno com maior area (a silhueta unificada)
-    main_contour = max(contours, key=cv2.contourArea)
+    main_base = max(contours_base, key=cv2.contourArea)
 
-    # Simplificar com Douglas-Peucker
+    # Simplificar contorno base
     if simplify_eps > 0:
-        arc = cv2.arcLength(main_contour, True)
-        # Epsilon como % do perimetro: 2.0 -> bem simplificado, 0.3 -> mais detalhado
-        epsilon = max(1.0, simplify_eps * arc / 1000.0)
-        simplified = cv2.approxPolyDP(main_contour, epsilon, True)
+        arc_base = cv2.arcLength(main_base, True)
+        eps_base = max(1.0, simplify_eps * arc_base / 1000.0)
+        base_contour = cv2.approxPolyDP(main_base, eps_base, True)
     else:
-        simplified = main_contour
+        base_contour = main_base
 
-    return simplified, mask
+    # Se não há sangria solicitada, o contorno de corte é o próprio contorno base
+    if bleed_mm <= 0 or dpi <= 0:
+        return base_contour, base_contour, mask
+
+    # --- Sangria via Dilatação Morfológica Paralela Exata ---
+    bleed_px = int(round((bleed_mm / 25.4) * dpi))
+    if bleed_px <= 0:
+        return base_contour, base_contour, mask
+
+    pad = bleed_px + 4
+    padded = cv2.copyMakeBorder(mask_filled, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    b_kernel_size = 2 * bleed_px + 1
+    b_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (b_kernel_size, b_kernel_size))
+    dilated_mask = cv2.dilate(padded, b_kernel)
+
+    contours_bleed, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours_bleed:
+        return base_contour, base_contour, mask
+
+    main_bleed = max(contours_bleed, key=cv2.contourArea).copy()
+    # Deslocar coordenadas de volta compensando o padding de segurança
+    main_bleed[:, 0, 0] -= pad
+    main_bleed[:, 0, 1] -= pad
+
+    if simplify_eps > 0:
+        arc_bleed = cv2.arcLength(main_bleed, True)
+        eps_bleed = max(1.0, simplify_eps * arc_bleed / 1000.0)
+        bleed_contour = cv2.approxPolyDP(main_bleed, eps_bleed, True)
+    else:
+        bleed_contour = main_bleed
+
+    return base_contour, bleed_contour, mask
+
+
+def extract_contour(
+    img: Image.Image,
+    white_threshold: int = 245,
+    softness: int = 18,
+    simplify_eps: float = 2.0,
+    close_gap_pct: float = 3.0,
+    edge_sensitivity: int = 30,
+    bleed_mm: float = 0.0,
+    dpi: int = 72,
+) -> Tuple[Optional[Contour], np.ndarray]:
+    """
+    Extrai o contorno externo UNIFICADO da silhueta da imagem.
+    Se bleed_mm > 0, já retorna o contorno com a sangria uniforme aplicada.
+    """
+    base, bleed, mask = extract_contour_pair(
+        img=img,
+        white_threshold=white_threshold,
+        softness=softness,
+        simplify_eps=simplify_eps,
+        close_gap_pct=close_gap_pct,
+        edge_sensitivity=edge_sensitivity,
+        bleed_mm=bleed_mm,
+        dpi=dpi,
+    )
+    return (bleed if bleed_mm > 0 else base), mask
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +255,8 @@ def _expand_contour_bleed(
     bleed_mm: float,
 ) -> List[Tuple[float, float]]:
     """
-    Expande o contorno radialmente a partir do centroide para adicionar sangria.
-    Cada ponto é empurrado 'bleed_mm' para fora a partir do centro do polígono.
+    Expansão radial legada (mantida apenas como fallback).
+    A extração morfológica em extract_contour_pair é o padrão preciso recomendado.
     """
     if bleed_mm <= 0 or len(points_mm) < 3:
         return points_mm
@@ -243,6 +301,7 @@ def contour_to_mm(
             y_mm = pixels_to_mm(y_px, dpi)
         points.append((x_mm, y_mm))
 
+    # Apenas se um caller externo ainda solicitar sangria aqui
     if bleed_mm > 0:
         points = _expand_contour_bleed(points, bleed_mm)
 
@@ -340,6 +399,8 @@ def process_totem_image(
             simplify_eps=simplify_eps,
             close_gap_pct=close_gap_pct,
             edge_sensitivity=edge_sensitivity,
+            bleed_mm=bleed_mm,
+            dpi=dpi,
         )
 
     if contour is None or len(contour) < 3:
@@ -350,7 +411,8 @@ def process_totem_image(
 
     _log(f"  Contorno extraído: {len(contour)} pontos")
 
-    points_mm = contour_to_mm(contour, dpi=dpi, bleed_mm=bleed_mm, img_height_px=img_h)
+    # Sangria uniforme já foi aplicada com precisão no espaço de pixels
+    points_mm = contour_to_mm(contour, dpi=dpi, bleed_mm=0.0, img_height_px=img_h)
 
     xs = [p[0] for p in points_mm]
     ys = [p[1] for p in points_mm]
@@ -359,7 +421,7 @@ def process_totem_image(
 
     _log(f"  Dimensões reais: {width_mm:.1f} × {height_mm:.1f} mm")
     if bleed_mm > 0:
-        _log(f"  Sangria aplicada: {bleed_mm} mm")
+        _log(f"  Sangria morfológica aplicada: {bleed_mm:.1f} mm (offset paralelo)")
 
     generate_dxf(points_mm, output_path, layer_name=layer_name)
     _log(f"  ✓ DXF gerado: {output_path.name}")

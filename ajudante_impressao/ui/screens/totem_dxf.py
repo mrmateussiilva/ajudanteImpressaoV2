@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...algorithms.totem_dxf import extract_contour, _get_dpi
+from ...algorithms.totem_dxf import extract_contour, extract_contour_pair, _get_dpi
 from ...services.totem_dxf import (
     TotemBatchRequest,
     TotemBatchResult,
@@ -43,7 +43,7 @@ from ...services.totem_dxf import (
     run_batch_totem,
     run_manual_totem,
 )
-from ..common import ScreenScaffold
+from ..common import ScreenScaffold, ZoomablePreviewWidget
 
 
 # ---------------------------------------------------------------------------
@@ -265,23 +265,10 @@ class TotemDxfWidget(QWidget, ScreenScaffold):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        container = QWidget()
-        container_layout = QVBoxLayout(container)
-        container_layout.setContentsMargins(16, 16, 16, 16)
-
-        self._preview_label = QLabel(
-            "Carregue uma imagem e clique em\n'Atualizar Preview do Contorno'"
+        self.preview_widget = ZoomablePreviewWidget(
+            placeholder_text="Carregue uma imagem e clique em 'Atualizar Preview do Contorno'"
         )
-        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_label.setMinimumHeight(380)
-        self._preview_label.setObjectName("muted")
-        container_layout.addWidget(self._preview_label)
-
-        scroll.setWidget(container)
-        layout.addWidget(scroll)
+        layout.addWidget(self.preview_widget)
         return widget
 
     def _build_log_tab(self) -> QWidget:
@@ -380,71 +367,87 @@ class TotemDxfWidget(QWidget, ScreenScaffold):
         try:
             opts = self._read_options()
             img = self._current_image
-            contour, _mask = extract_contour(
+            dpi = _get_dpi(img, opts.dpi_override)
+
+            base_contour, bleed_contour, _mask = extract_contour_pair(
                 img,
                 white_threshold=opts.white_threshold,
                 softness=opts.softness,
                 simplify_eps=opts.simplify_eps,
                 close_gap_pct=opts.close_gap_pct,
                 edge_sensitivity=opts.edge_sensitivity,
+                bleed_mm=opts.bleed_mm,
+                dpi=dpi,
             )
 
-            # Gerar thumbnail com overlay do contorno
-            thumb = _make_thumb(img, max_w=820, max_h=680)
+            # Para preview de alta fidelidade que suporta zoom avançado
+            thumb = _make_thumb(img, max_w=2400, max_h=2400)
             scale_x = thumb.width / img.width
             scale_y = thumb.height / img.height
 
-            # Renderizar fundo xadrez para transparência
-            try:
-                display = _checkerboard(thumb.convert("RGBA"))
-            except Exception:
-                display = thumb.convert("RGB")
+            # Imagem base em QPixmap
+            pixmap = _pil_to_qpixmap(thumb)
 
-            pixmap = _pil_to_qpixmap(display)
+            contour_to_use = bleed_contour if opts.bleed_mm > 0 else base_contour
 
-            if contour is not None and len(contour) >= 2:
-                # Desenhar contorno sobre o pixmap usando QPainter
+            if contour_to_use is not None and len(contour_to_use) >= 2:
                 painter = QPainter(pixmap)
-                pen = QPen(QColor("#00C2A8"))  # cor accent do tema
-                pen.setWidth(3)
-                painter.setPen(pen)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-                pts = [(int(pt[0][0] * scale_x), int(pt[0][1] * scale_y)) for pt in contour]
+                # Se houver sangria, desenha primeiro a borda original da arte (tracejada em azul suave)
+                if opts.bleed_mm > 0 and base_contour is not None and len(base_contour) >= 2:
+                    base_pen = QPen(QColor("#60A5FA"))  # Azul claro
+                    base_pen.setWidth(2)
+                    base_pen.setStyle(Qt.PenStyle.DashLine)
+                    painter.setPen(base_pen)
+                    base_pts = [(int(pt[0][0] * scale_x), int(pt[0][1] * scale_y)) for pt in base_contour]
+                    for i in range(len(base_pts)):
+                        p1 = base_pts[i]
+                        p2 = base_pts[(i + 1) % len(base_pts)]
+                        painter.drawLine(p1[0], p1[1], p2[0], p2[1])
+
+                # Desenha o contorno de corte DXF principal (verde turquesa sólido)
+                cut_pen = QPen(QColor("#00C2A8"))
+                cut_pen.setWidth(3)
+                painter.setPen(cut_pen)
+
+                pts = [(int(pt[0][0] * scale_x), int(pt[0][1] * scale_y)) for pt in contour_to_use]
                 for i in range(len(pts)):
                     x1, y1 = pts[i]
                     x2, y2 = pts[(i + 1) % len(pts)]
                     painter.drawLine(x1, y1, x2, y2)
 
-                # Marcar pontos de vértice
-                pen2 = QPen(QColor("#FF6B6B"))
-                pen2.setWidth(6)
-                painter.setPen(pen2)
+                # Marcar pontos de vértice (vermelho)
+                pen_points = QPen(QColor("#FF6B6B"))
+                pen_points.setWidth(6)
+                painter.setPen(pen_points)
                 for x, y in pts:
                     painter.drawPoint(x, y)
 
                 painter.end()
 
-                dpi = _get_dpi(img, opts.dpi_override)
-                w_mm = (img.width / dpi) * 25.4
-                h_mm = (img.height / dpi) * 25.4
+                # Dimensões do corte real em milímetros
+                xs = [p[0][0] for p in contour_to_use]
+                ys = [p[0][1] for p in contour_to_use]
+                w_mm = ((max(xs) - min(xs)) / dpi) * 25.4
+                h_mm = ((max(ys) - min(ys)) / dpi) * 25.4
+
                 info = (
-                    f"  Contorno: {len(contour)} pontos  |  "
-                    f"DPI: {dpi}  |  "
-                    f"Dimensão: {w_mm:.1f} × {h_mm:.1f} mm"
+                    f"Contorno: {len(contour_to_use)} pontos | "
+                    f"DPI: {dpi} | "
+                    f"Corte DXF: {w_mm:.1f} × {h_mm:.1f} mm"
                 )
                 if opts.bleed_mm > 0:
-                    info += f"  |  Sangria: {opts.bleed_mm} mm"
+                    info += f" (Sangria morfológica: {opts.bleed_mm:.1f} mm)"
+
                 self._preview_info.setText(info)
+                self.preview_widget.set_pixmap(pixmap, info_text=info)
             else:
                 self._preview_info.setText(
-                    "⚠  Nenhum contorno encontrado. Ajuste o threshold de branco."
+                    "⚠ Nenhum contorno encontrado. Ajuste o threshold de branco."
                 )
+                self.preview_widget.clear("Nenhum contorno encontrado. Ajuste o threshold de branco.")
 
-            self._preview_label.setPixmap(pixmap)
-            self._preview_label.setAlignment(
-                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
-            )
-            self._preview_label.setText("")
             self._tabs.setCurrentIndex(0)
 
         except Exception as exc:

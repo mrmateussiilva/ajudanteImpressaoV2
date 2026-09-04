@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...services.roll_packer import PERFORMANCE_PROFILES, RollerPackRequest, RollerPackResult, run_roll_packer
-from ..common import ScreenScaffold
+from ..common import ScreenScaffold, ZoomablePreviewWidget
 
 
 def _checkerboard_image(img: Image.Image, block: int = 16) -> Image.Image:
@@ -289,20 +289,22 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.preview_scroll = QScrollArea()
-        self.preview_scroll.setWidgetResizable(True)
-        self.preview_content = QWidget()
-        self.preview_layout = QVBoxLayout(self.preview_content)
-        self.preview_layout.setContentsMargins(16, 16, 16, 16)
-        self.preview_layout.setSpacing(10)
-        self.preview_label = QLabel("A previa aparecera aqui apos gerar o rolo.")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setObjectName("muted")
-        self.preview_label.setMinimumHeight(280)
-        self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.preview_layout.addWidget(self.preview_label)
-        self.preview_scroll.setWidget(self.preview_content)
-        layout.addWidget(self.preview_scroll)
+        layout.setSpacing(6)
+
+        # Card de estatísticas de aproveitamento (quando gerado)
+        self.stats_card = QFrame()
+        self.stats_card.setObjectName("fieldCard")
+        self.stats_layout = QHBoxLayout(self.stats_card)
+        self.stats_layout.setContentsMargins(14, 8, 14, 8)
+        self.stats_layout.setSpacing(12)
+        self.stats_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stats_card.setVisible(False)
+        layout.addWidget(self.stats_card)
+
+        self.preview_widget = ZoomablePreviewWidget(
+            placeholder_text="A prévia aparecerá aqui após gerar o rolo."
+        )
+        layout.addWidget(self.preview_widget, 1)
         return widget
 
     def _build_debug_tab(self) -> QWidget:
@@ -384,8 +386,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
 
         self.log_output.clear()
         self.debug_list.clear()
-        self.preview_label.setText("Carregando imagens...")
-        self.preview_label.setPixmap(QPixmap())
+        self.preview_widget.clear("Carregando imagens...")
         self._set_running(True)
 
         self._worker_thread = QThread(self)
@@ -497,8 +498,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         )
 
         self.log_output.clear()
-        self.preview_label.setText("Processando...")
-        self.preview_label.setPixmap(QPixmap())
+        self.preview_widget.clear("Processando layout do rolo...")
         self._set_running(True)
 
         self._worker_thread = QThread(self)
@@ -550,33 +550,29 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._worker_thread = None
 
     def _show_preview(self, img: Image.Image, result: RollerPackResult | None = None) -> None:
-        max_w = 760
-        ratio = min(1.0, max_w / img.width) if img.width > 0 else 1.0
-        thumb = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.Resampling.LANCZOS)
-        pixmap = pil_to_qpixmap(_checkerboard_image(thumb))
+        # Gera visualização em alta fidelidade para navegação interativa (zoom/pan)
+        max_preview_w = 2600
+        ratio = min(1.0, max_preview_w / img.width) if img.width > 0 else 1.0
+        if ratio < 1.0:
+            preview_img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.Resampling.LANCZOS)
+        else:
+            preview_img = img
+
+        pixmap = pil_to_qpixmap(preview_img)
         self._preview_pixmap = pixmap
 
-        self.preview_label.setText("")
-        self.preview_label.setPixmap(pixmap)
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-
-        size_label = QLabel(
-            f"{img.width}×{img.height}px  ·  {img.width / 100 * 2.54:.1f}×{img.height / 100 * 2.54:.1f}cm"
+        dim_info = (
+            f"Rolo: {img.width}×{img.height} px  ·  "
+            f"{img.width / 100 * 2.54:.1f} × {img.height / 100 * 2.54:.1f} cm"
         )
-        size_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        size_label.setObjectName("muted")
+        self.preview_widget.set_pixmap(pixmap, info_text=dim_info)
 
-        self._clear_layout(self.preview_layout)
-        self.preview_layout.addWidget(self.preview_label)
-        self.preview_layout.addWidget(size_label)
-
-        if result is not None and result.yield_pct > 0:
-            stats_card = QFrame()
-            stats_card.setObjectName("fieldCard")
-            stats_layout = QHBoxLayout(stats_card)
-            stats_layout.setContentsMargins(14, 10, 14, 10)
-            stats_layout.setSpacing(12)
-            stats_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Atualiza métricas de aproveitamento se disponíveis
+        if result is not None and getattr(result, "yield_pct", 0) > 0:
+            while self.stats_layout.count():
+                item = self.stats_layout.takeAt(0)
+                if item.widget() is not None:
+                    item.widget().deleteLater()
 
             yield_lbl = QLabel(f"✓ {result.yield_pct}% Aproveitamento Útil")
             yield_lbl.setStyleSheet(
@@ -603,12 +599,15 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
                 "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
             )
 
-            stats_layout.addWidget(yield_lbl)
-            stats_layout.addWidget(waste_lbl)
-            stats_layout.addWidget(area_lbl)
-            stats_layout.addWidget(time_lbl)
-            self.preview_layout.addWidget(stats_card)
+            self.stats_layout.addWidget(yield_lbl)
+            self.stats_layout.addWidget(waste_lbl)
+            self.stats_layout.addWidget(area_lbl)
+            self.stats_layout.addWidget(time_lbl)
+            self.stats_card.setVisible(True)
+        else:
+            self.stats_card.setVisible(False)
 
+        self.tabs.setCurrentIndex(1)
         self.tabs.setCurrentIndex(1)
 
     def _show_debug_images(self, payload: DebugPayload) -> None:
@@ -985,7 +984,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
-            if widget is not None and widget is not self.preview_label:
+            if widget is not None:
                 widget.deleteLater()
 
 

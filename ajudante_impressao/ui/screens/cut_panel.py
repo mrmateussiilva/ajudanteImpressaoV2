@@ -31,8 +31,7 @@ from ...services.cut_panel import (
     run_batch_cut,
     run_manual_cut,
 )
-from ..common import ScreenScaffold
-from .roll_packer import _checkerboard_image, pil_to_qpixmap
+from ..common import ScreenScaffold, ZoomablePreviewWidget, pil_to_qpixmap
 
 
 @dataclass(slots=True)
@@ -190,18 +189,10 @@ class CutPanelWidget(QWidget, ScreenScaffold):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.preview_scroll = QScrollArea()
-        self.preview_scroll.setWidgetResizable(True)
-        self.preview_container = QWidget()
-        self.preview_layout = QVBoxLayout(self.preview_container)
-        self.preview_layout.setContentsMargins(16, 16, 16, 16)
-        self.preview_label = QLabel("Carregue uma imagem para visualizar o painel.")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumHeight(340)
-        self.preview_label.setObjectName("muted")
-        self.preview_layout.addWidget(self.preview_label)
-        self.preview_scroll.setWidget(self.preview_container)
-        layout.addWidget(self.preview_scroll)
+        self.preview_widget = ZoomablePreviewWidget(
+            placeholder_text="Carregue uma imagem para visualizar o painel."
+        )
+        layout.addWidget(self.preview_widget)
         return widget
 
     def _build_info_tab(self) -> QWidget:
@@ -418,11 +409,17 @@ class CutPanelWidget(QWidget, ScreenScaffold):
             self.progress.setValue(0)
 
     def _show_preview(self, img: Image.Image) -> None:
-        max_w = 820
-        ratio = min(1.0, max_w / img.width) if img.width > 0 else 1.0
-        thumb = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.Resampling.LANCZOS)
-        pixmap = pil_to_qpixmap(_checkerboard_image(thumb))
+        max_preview_w = 2600
+        ratio = min(1.0, max_preview_w / img.width) if img.width > 0 else 1.0
+        if ratio < 1.0:
+            thumb = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))), Image.Resampling.LANCZOS)
+        else:
+            thumb = img
+        pixmap = pil_to_qpixmap(thumb)
         self._preview_pixmap = pixmap
-        self.preview_label.setText("")
-        self.preview_label.setPixmap(pixmap)
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        dpi_val = self._manual_dpi() or resolve_dpi(img)
+        w_cm = px_to_cm(img.width, dpi=dpi_val)
+        h_cm = px_to_cm(img.height, dpi=dpi_val)
+        info_str = f"Painel: {img.width}×{img.height} px · {w_cm:.1f} × {h_cm:.1f} cm (DPI: {dpi_val})"
+        self.preview_widget.set_pixmap(pixmap, info_text=info_str)
