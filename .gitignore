@@ -11,3 +11,5 @@ wheels/
 
 # Local data
 data/
+testes/
+.ajudante_cache/
