@@ -16,6 +16,8 @@ from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
+
+Image.MAX_IMAGE_PIXELS = None
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtGui import QFont, QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
@@ -385,8 +387,17 @@ class TotemDxfWidget(QWidget, ScreenScaffold):
             scale_x = thumb.width / img.width
             scale_y = thumb.height / img.height
 
-            # Imagem base em QPixmap
-            pixmap = _pil_to_qpixmap(thumb)
+            # Imagem base em QPixmap (com xadrez se for transparente)
+            if thumb.mode in ("RGBA", "LA") and "A" in thumb.getbands():
+                alpha_arr = np.array(thumb.getchannel("A"))
+                if np.any(alpha_arr < 240):
+                    thumb_display = _checkerboard(thumb)
+                else:
+                    thumb_display = thumb
+            else:
+                thumb_display = thumb
+
+            pixmap = _pil_to_qpixmap(thumb_display)
 
             contour_to_use = bleed_contour if opts.bleed_mm > 0 else base_contour
 

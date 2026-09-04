@@ -42,6 +42,8 @@ class DxfResult:
     dpi_used: int
 
 
+Image.MAX_IMAGE_PIXELS = None
+
 # ---------------------------------------------------------------------------
 # Extracao de contorno
 # ---------------------------------------------------------------------------
@@ -52,43 +54,68 @@ def _get_silhouette_mask(
     edge_sensitivity: int = 30,
 ) -> np.ndarray:
     """
-    Gera mascara binaria 8-bit da silhueta usando abordagem HIBRIDA:
+    Gera máscara binária 8-bit da silhueta da arte do totem (255 = arte, 0 = fundo).
 
-    1. Deteccao de bordas (Canny) — detecta contornos desenhados,
-       tracos, outlines. Funciona para arte branca sobre branco.
-    2. Deteccao de areas coloridas — pixels que nao sao brancos/claros.
-    3. OR das duas mascaras — qualquer pixel que seja borda OU colorido
-       faz parte da silhueta.
-
-    Isso resolve o problema de arte clara (flores brancas, sketches)
-    onde o remove_white apagava a propria arte.
-
-    Args:
-        img:              Imagem PIL de entrada
-        white_threshold:  Sensibilidade de deteccao de nao-branco (0-255)
-                          Valor menor = detecta mais pixeis como nao-brancos
-        edge_sensitivity: Limiar baixo do Canny (0-100).
-                          Valor menor = detecta tracos mais finos/claros
+    Pipeline robusto:
+      1. Transparência Alfa:
+         Se a imagem possui canal alfa e há pixels transparentes (PNG/WebP),
+         extrai a silhueta diretamente da transparência.
+      2. Imagens com fundo branco/claro (JPG/PNG sólido):
+         - Identifica candidatos a fundo com base na distância até o branco puro
+           usando white_threshold.
+         - Protege bordas detectadas (Canny) para que o fundo não invada artes claras.
+         - Detecta e neutraliza linhas/molduras escuras de 1-8px comuns em exportações CAD.
+         - Executa floodFill a partir de uma margem externa artificial (1px pad),
+           garantindo que o fundo externo ao redor de toda a arte seja identificado,
+           mesmo quando a arte toca as bordas ou a base da imagem.
     """
-    arr = np.array(img.convert("RGB"))
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    # 1. Caso Alpha: transparência real
+    if img.mode in ("RGBA", "LA") or ("transparency" in img.info):
+        rgba_img = img.convert("RGBA")
+        alpha = np.array(rgba_img.getchannel("A"))
+        if np.any(alpha < 240):
+            return (alpha > 15).astype(np.uint8) * 255
 
-    # --- Metodo 1: Deteccao de bordas (Canny) ---
-    # Blur leve para reduzir ruido de JPEG antes do Canny
-    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-    lo = max(5, edge_sensitivity)
-    hi = min(255, lo * 3)
-    edges = cv2.Canny(blurred, lo, hi)
+    # 2. Caso Fundo Branco / Sólido
+    rgb_img = img.convert("RGB")
+    arr = np.array(rgb_img)
+    rgb = arr[:, :, :3].astype(np.int16)
 
-    # --- Metodo 2: Areas nao-brancas (cores, sombras, preenchimentos) ---
-    # Distancia do branco puro: quanto mais escuro/colorido, maior o valor
-    dist_white = 255 - gray
-    sensitivity = max(1, 255 - white_threshold)  # quanto menor o threshold, mais detecta
-    _, color_mask = cv2.threshold(dist_white, sensitivity, 255, cv2.THRESH_BINARY)
+    white_tolerance = max(1, 255 - white_threshold)
+    dist_white = np.max(np.abs(255 - rgb), axis=2)
+    candidate_bg = (dist_white <= white_tolerance).astype(np.uint8) * 255
 
-    # --- Combinar: qualquer pixel detectado por qualquer metodo conta ---
-    combined = cv2.bitwise_or(edges, color_mask)
-    return combined
+    # Proteção de traços finos/claros na borda da arte
+    if edge_sensitivity > 0:
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        lo = max(10, edge_sensitivity)
+        hi = min(255, lo * 3)
+        edges = cv2.Canny(blurred, lo, hi)
+        candidate_bg[(edges > 0) & (dist_white > 4)] = 0
+
+    # Burlar molduras/linhas escuras artificiais de exportação (1-10px) nas bordas
+    h, w = candidate_bg.shape
+    max_d = min(12, min(h, w) // 4)
+    for d in range(1, max_d):
+        if np.mean(dist_white[0:d, :] > white_tolerance) > 0.8 and np.mean(dist_white[d, :] <= white_tolerance) > 0.7:
+            candidate_bg[0:d, :] = 255
+        if np.mean(dist_white[-d:, :] > white_tolerance) > 0.8 and np.mean(dist_white[-1-d, :] <= white_tolerance) > 0.7:
+            candidate_bg[-d:, :] = 255
+        if np.mean(dist_white[:, 0:d] > white_tolerance) > 0.8 and np.mean(dist_white[:, d] <= white_tolerance) > 0.7:
+            candidate_bg[:, 0:d] = 255
+        if np.mean(dist_white[:, -d:] > white_tolerance) > 0.8 and np.mean(dist_white[:, -1-d] <= white_tolerance) > 0.7:
+            candidate_bg[:, -d:] = 255
+
+    # Inundação conexa a partir da borda externa
+    flood = cv2.copyMakeBorder(candidate_bg, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255)
+    flood_mask = np.zeros((flood.shape[0] + 2, flood.shape[1] + 2), dtype=np.uint8)
+    cv2.floodFill(flood, flood_mask, (0, 0), 128)
+    connected_bg = (flood[1:-1, 1:-1] == 128)
+
+    # A máscara da silhueta é tudo que NÃO é o fundo externo conectado
+    mask = (~connected_bg).astype(np.uint8) * 255
+    return mask
 
 
 # Alias para compatibilidade interna (nao exposto publicamente)
@@ -144,31 +171,18 @@ def extract_contour_pair(
         - bleed_contour: contorno simplificado com a sangria uniforme aplicada
         - mask: máscara de silhueta/bordas
     """
-    # Mascara hibrida: bordas + areas coloridas
     mask = _get_silhouette_mask(img, white_threshold=white_threshold, edge_sensitivity=edge_sensitivity)
 
-    # --- Fechamento morfologico AGRESSIVO ---
+    # Fechamento morfológico para conectar pequenas descontinuidades e unir partes próximas
     min_side = min(mask.shape[0], mask.shape[1])
-    close_radius = max(15, int(min_side * close_gap_pct / 100))
-    kernel_size = 2 * close_radius + 1  # sempre impar
+    close_radius = min(45, max(2, int(round(min_side * (close_gap_pct / 100.0)))))
+    kernel_size = 2 * close_radius + 1
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # Dilatar -> preenche espacos brancos entre bordas e entre partes
-    mask_dilated = cv2.dilate(mask, kernel, iterations=1)
-    # Fechar -> suaviza e une completamente
-    mask_closed = cv2.morphologyEx(mask_dilated, cv2.MORPH_CLOSE, kernel)
-
-    # Preencher buracos internos (olhos, centros de flores, etc.)
-    flood = mask_closed.copy()
-    h, w = flood.shape
-    border_mask = np.zeros((h + 2, w + 2), np.uint8)
-    cv2.floodFill(flood, border_mask, (0, 0), 255)
-    holes = cv2.bitwise_not(flood)
-    mask_filled = cv2.bitwise_or(mask_closed, holes)
-
-    contours_base, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_base, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours_base:
-        return None, None, mask
+        return None, None, mask_closed
 
     main_base = max(contours_base, key=cv2.contourArea)
 
@@ -182,22 +196,22 @@ def extract_contour_pair(
 
     # Se não há sangria solicitada, o contorno de corte é o próprio contorno base
     if bleed_mm <= 0 or dpi <= 0:
-        return base_contour, base_contour, mask
+        return base_contour, base_contour, mask_closed
 
     # --- Sangria via Dilatação Morfológica Paralela Exata ---
     bleed_px = int(round((bleed_mm / 25.4) * dpi))
     if bleed_px <= 0:
-        return base_contour, base_contour, mask
+        return base_contour, base_contour, mask_closed
 
     pad = bleed_px + 4
-    padded = cv2.copyMakeBorder(mask_filled, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    padded = cv2.copyMakeBorder(mask_closed, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
     b_kernel_size = 2 * bleed_px + 1
     b_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (b_kernel_size, b_kernel_size))
     dilated_mask = cv2.dilate(padded, b_kernel)
 
     contours_bleed, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours_bleed:
-        return base_contour, base_contour, mask
+        return base_contour, base_contour, mask_closed
 
     main_bleed = max(contours_bleed, key=cv2.contourArea).copy()
     # Deslocar coordenadas de volta compensando o padding de segurança
@@ -211,7 +225,7 @@ def extract_contour_pair(
     else:
         bleed_contour = main_bleed
 
-    return base_contour, bleed_contour, mask
+    return base_contour, bleed_contour, mask_closed
 
 
 def extract_contour(
