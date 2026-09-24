@@ -454,7 +454,8 @@ def _generate_roll_dxf(
         )
 
     # ── Contornos das peças ──────────────────────────────────────────────────
-    for img, x, y in packed:
+    def _process_piece(piece: tuple[Image.Image, int, int]) -> list[list[tuple[float, float]]]:
+        img, x, y = piece
         orig_id = img.info.get("_original_id", None)
         angle = img.info.get("_original_angle", 0)
 
@@ -473,8 +474,8 @@ def _generate_roll_dxf(
         if clean_variant.mode != "RGBA":
             clean_variant = clean_variant.convert("RGBA")
 
-        # Extrai todos os contornos da peça (pode ter múltiplos para artes complexas)
-        all_contours = _extract_piece_contours(
+        # Extrai todos os contornos da peça
+        return _extract_piece_contours(
             clean_variant=clean_variant,
             x=x,
             y=y,
@@ -483,6 +484,11 @@ def _generate_roll_dxf(
             dpi=dpi,
         )
 
+    # Processar em paralelo para acelerar extração de contornos pesados
+    with ThreadPoolExecutor(max_workers=max(1, min(len(packed), 8))) as ex:
+        all_pieces_contours = list(ex.map(_process_piece, packed))
+
+    for all_contours in all_pieces_contours:
         for pts_roll in all_contours:
             if len(pts_roll) < 3:
                 continue

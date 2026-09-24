@@ -143,7 +143,7 @@ def _build_stamp_kernel(spacing: int) -> np.ndarray:
 try:
     import numba
 
-    @numba.njit(fastmath=True, nogil=True)
+    @numba.njit(fastmath=True, nogil=True, cache=True)
     def _collides_fast(
         occupancy: np.ndarray,
         mask: np.ndarray,
@@ -168,7 +168,7 @@ try:
                     return True
         return False
 
-    @numba.njit(fastmath=True, nogil=True)
+    @numba.njit(fastmath=True, nogil=True, cache=True)
     def _collides_coarse(
         scaled_occ: np.ndarray,
         scaled_mask: np.ndarray,
@@ -192,7 +192,7 @@ try:
                     return True
         return False
 
-    @numba.njit(fastmath=True, nogil=True)
+    @numba.njit(fastmath=True, nogil=True, cache=True)
     def _fast_score_contact(
         occupancy: np.ndarray,
         x: int, y: int,
@@ -279,7 +279,7 @@ try:
         pocket_bonus = sides_count * 1000 if is_pocket else 0
         return raw_contact, pocket_bonus
 
-    @numba.njit(fastmath=True, nogil=True)
+    @numba.njit(fastmath=True, nogil=True, cache=True)
     def _find_row_transitions_fast(row: np.ndarray, margin: int):
         n = len(row)
         transitions = []
