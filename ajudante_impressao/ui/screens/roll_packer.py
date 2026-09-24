@@ -115,7 +115,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(16)
 
-        sidebar = self.wrap_sidebar(self._build_sidebar(), 376)
+        sidebar = self.wrap_sidebar(self._build_sidebar(), 404)
         main_panel = self._build_main()
         layout.addWidget(sidebar, 0)
         layout.addWidget(main_panel, 1)
@@ -219,7 +219,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._color_swatch = QLabel()
         self._color_swatch.setFixedSize(32, 32)
         self._color_swatch.setStyleSheet(
-            "background-color: #000000; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);"
+            "background-color: #000000; border-radius: 6px; border: 1px solid #CBD5E1;"
         )
         color_row.addWidget(self._color_swatch)
         self._color_btn = QPushButton("Escolher cor")
@@ -378,7 +378,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             self._label_text_color = (color.red(), color.green(), color.blue(), color.alpha())
             hex_color = color.name()  # ex: "#1a2b3c"
             self._color_swatch.setStyleSheet(
-                f"background-color: {hex_color}; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);"
+                f"background-color: {hex_color}; border-radius: 6px; border: 1px solid #CBD5E1;"
             )
 
     def _choose_folder(self) -> None:
@@ -633,27 +633,29 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
 
             yield_lbl = QLabel(f"✓ {result.yield_pct}% Aproveitamento Útil")
             yield_lbl.setStyleSheet(
-                "background: rgba(166, 227, 161, 0.15); color: #A6E3A1; border: 1px solid #A6E3A1; "
-                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+                "background: #DCFCE7; color: #16A34A; border: 1px solid #86EFAC; "
+                "font-weight: 700; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
             )
 
-            waste_color = "#F38BA8" if result.waste_pct > 30 else "#F9E2AF"
+            waste_color = "#DC2626" if result.waste_pct > 30 else "#CA8A04"
+            waste_bg = "#FEE2E2" if result.waste_pct > 30 else "#FEF9C3"
+            waste_border = "#FCA5A5" if result.waste_pct > 30 else "#FDE047"
             waste_lbl = QLabel(f"⚠ {result.waste_pct}% Sobra / Desperdício")
             waste_lbl.setStyleSheet(
-                f"background: rgba(243, 139, 168, 0.15); color: {waste_color}; border: 1px solid {waste_color}; "
-                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+                f"background: {waste_bg}; color: {waste_color}; border: 1px solid {waste_border}; "
+                "font-weight: 700; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
             )
 
             area_lbl = QLabel(f"📐 {result.total_area_m2} m² Área Total")
             area_lbl.setStyleSheet(
-                "background: rgba(59, 130, 246, 0.15); color: #3B82F6; border: 1px solid #3B82F6; "
-                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+                "background: #EFF6FF; color: #2563EB; border: 1px solid #BFDBFE; "
+                "font-weight: 700; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
             )
 
             time_lbl = QLabel(f"⏱ {result.elapsed_seconds:.1f}s Tempo Geração")
             time_lbl.setStyleSheet(
-                "background: rgba(195, 160, 245, 0.15); color: #C3A0F5; border: 1px solid #C3A0F5; "
-                "font-weight: bold; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
+                "background: #F5F3FF; color: #7C3AED; border: 1px solid #DDD6FE; "
+                "font-weight: 700; font-size: 12px; border-radius: 6px; padding: 4px 10px;"
             )
 
             self.stats_layout.addWidget(yield_lbl)
@@ -683,9 +685,9 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             card = QFrame()
             card.setStyleSheet(
                 "QFrame {"
-                "    background-color: rgba(30, 30, 46, 0.6);"
+                "    background-color: #FFFFFF;"
                 "    border-radius: 8px;"
-                "    border: 1px solid rgba(255, 255, 255, 0.1);"
+                "    border: 1px solid #CBD5E1;"
                 "}"
             )
             card_layout = QVBoxLayout(card)
@@ -703,7 +705,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             font = name_lbl.font()
             font.setBold(True)
             name_lbl.setFont(font)
-            name_lbl.setStyleSheet("border: none; background: transparent; color: #CDD6F4;")
+            name_lbl.setStyleSheet("border: none; background: transparent; color: #0F172A;")
             
             metrics = name_lbl.fontMetrics()
             elided_name = metrics.elidedText(item['name'], Qt.TextElideMode.ElideRight, 196)
@@ -729,24 +731,25 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             
             input_style = (
                 "QLineEdit {"
-                "    background: #313244;"
-                "    color: #CDD6F4;"
-                "    border: 1px solid rgba(255, 255, 255, 0.1);"
+                "    background: #FFFFFF;"
+                "    color: #0F172A;"
+                "    border: 1px solid #CBD5E1;"
                 "    border-radius: 4px;"
                 "    font-size: 11px;"
+                "    font-weight: 600;"
                 "    padding: 2px;"
                 "}"
                 "QLineEdit:focus {"
-                "    border: 1px solid #3B82F6;"
+                "    border: 2px solid #2563EB;"
                 "}"
             )
             w_input.setStyleSheet(input_style)
             h_input.setStyleSheet(input_style)
 
             times_lbl = QLabel("×")
-            times_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px; border: none; background: transparent;")
+            times_lbl.setStyleSheet("color: #64748B; font-size: 11px; border: none; background: transparent; font-weight: bold;")
             cm_lbl = QLabel("cm")
-            cm_lbl.setStyleSheet("color: #A6ADC8; font-size: 11px; border: none; background: transparent;")
+            cm_lbl.setStyleSheet("color: #64748B; font-size: 11px; border: none; background: transparent;")
 
             dim_layout.addWidget(w_input)
             dim_layout.addWidget(times_lbl)
@@ -886,19 +889,20 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             cat_combo.setCurrentText(current_cat)
             cat_combo.setStyleSheet(
                 "QComboBox {"
-                "    background: #313244;"
-                "    color: #CDD6F4;"
+                "    background: #FFFFFF;"
+                "    color: #0F172A;"
                 "    border-radius: 4px;"
                 "    padding: 2px 6px;"
-                "    font-size: 10px;"
-                "    font-weight: bold;"
-                "    border: 1px solid rgba(255, 255, 255, 0.15);"
+                "    font-size: 11px;"
+                "    font-weight: 600;"
+                "    border: 1px solid #CBD5E1;"
                 "}"
                 "QComboBox::drop-down { border: none; }"
                 "QComboBox QAbstractItemView {"
-                "    background-color: #1e1e2e;"
-                "    color: #CDD6F4;"
-                "    selection-background-color: #45475a;"
+                "    background-color: #FFFFFF;"
+                "    color: #0F172A;"
+                "    selection-background-color: #EFF6FF;"
+                "    selection-color: #2563EB;"
                 "}"
             )
 
@@ -914,8 +918,8 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
                 conf_bg = "#ef4444"
                 conf_fg = "#ffffff"
             else:
-                conf_bg = "#45475a"
-                conf_fg = "#bac2de"
+                conf_bg = "#64748B"
+                conf_fg = "#ffffff"
 
             conf_badge = QLabel(f"{conf_val:.0f}%" if conf_val > 0 else "--")
             conf_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -949,17 +953,18 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
 
             def _apply_qual_style(combo: QComboBox, text: str):
                 t_low = text.lower()
-                color = "#A6E3A1" if "boa" in t_low else "#F9E2AF" if "aceit" in t_low else "#F38BA8"
+                fg_color = "#16A34A" if "boa" in t_low else "#CA8A04" if "aceit" in t_low else "#DC2626"
+                bg_color = "#DCFCE7" if "boa" in t_low else "#FEF9C3" if "aceit" in t_low else "#FEE2E2"
                 combo.setStyleSheet(
-                    f"QComboBox {{ background: #313244; color: {color}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {color}; }}"
+                    f"QComboBox {{ background: {bg_color}; color: {fg_color}; border-radius: 4px; padding: 2px 6px; font-size: 10px; font-weight: bold; border: 1px solid {fg_color}; }}"
                     "QComboBox::drop-down { border: none; }"
-                    "QComboBox QAbstractItemView { background-color: #1e1e2e; color: #cdd6f4; selection-background-color: #45475a; }"
+                    "QComboBox QAbstractItemView { background-color: #FFFFFF; color: #0F172A; selection-background-color: #EFF6FF; }"
                 )
 
             _apply_qual_style(qual_combo, qual_combo.currentText())
 
             learn_status_lbl = QLabel("")
-            learn_status_lbl.setStyleSheet("font-size: 9px; color: #a6e3a1; font-weight: bold;")
+            learn_status_lbl.setStyleSheet("font-size: 10px; color: #16A34A; font-weight: bold;")
             learn_status_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             # Handlers de feedback em tempo real

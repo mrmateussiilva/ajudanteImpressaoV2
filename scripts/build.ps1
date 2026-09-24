@@ -1,6 +1,6 @@
-$ErrorActionPreference = "Stop"
+# $ErrorActionPreference = "Stop"
 
-Write-Host "Iniciando compilação com Nuitka..." -ForegroundColor Cyan
+# Write-Host "Iniciando compilação com Nuitka..." -ForegroundColor Cyan
 
 # Garante que as dependências estão atualizadas
 uv sync
@@ -18,4 +18,4 @@ python -m nuitka `
     --output-filename=StudioImpressao.exe `
     main.py
 
-Write-Host "Compilação concluída! O executável StudioImpressao.exe foi gerado na raiz." -ForegroundColor Green
+# Write-Host "Compilação concluída! O executável StudioImpressao.exe foi gerado na raiz." -ForegroundColor Green

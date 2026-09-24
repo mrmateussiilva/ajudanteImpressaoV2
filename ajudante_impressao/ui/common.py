@@ -31,13 +31,13 @@ class ScreenScaffold:
         scroll.setWidget(widget)
         return scroll
 
-    def build_sidebar_frame(self, width: int = 360) -> tuple[QFrame, QVBoxLayout]:
+    def build_sidebar_frame(self, width: int = 384) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("card")
         frame.setFixedWidth(width)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         return frame, layout
 
     def build_sidebar_header(self, title_text: str, subtitle_text: str, version_text: str = "v1.0.1") -> QFrame:
@@ -89,11 +89,12 @@ class ScreenScaffold:
         card = QFrame()
         card.setObjectName("fieldCard")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(12, 10, 12, 10)
-        card_layout.setSpacing(6)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        card_layout.setSpacing(4)
 
         label = label_text if not suffix else f"{label_text} ({suffix})"
         field_label = self.field_label(label)
+        field_label.setWordWrap(True)
         card_layout.addWidget(field_label)
 
         entry = QLineEdit()
@@ -175,10 +176,10 @@ class _InteractiveGraphicsView(QGraphicsView):
         tile = 16
         bg_pix = QPixmap(tile * 2, tile * 2)
         p = QPainter(bg_pix)
-        p.fillRect(0, 0, tile, tile, QColor("#14161A"))
-        p.fillRect(tile, tile, tile, tile, QColor("#14161A"))
-        p.fillRect(tile, 0, tile, tile, QColor("#1B1E24"))
-        p.fillRect(0, tile, tile, tile, QColor("#1B1E24"))
+        p.fillRect(0, 0, tile, tile, QColor("#F1F5F9"))
+        p.fillRect(tile, tile, tile, tile, QColor("#F1F5F9"))
+        p.fillRect(tile, 0, tile, tile, QColor("#E2E8F0"))
+        p.fillRect(0, tile, tile, tile, QColor("#E2E8F0"))
         p.end()
         self.setBackgroundBrush(QBrush(bg_pix))
 
@@ -271,49 +272,35 @@ class ZoomablePreviewWidget(QWidget):
         self._info_label.setFont(font)
         tb_layout.addWidget(self._info_label, 1)
 
-        btn_style = (
-            "QPushButton {"
-            "  background: #1D2024;"
-            "  border: 1px solid rgba(255,255,255,0.1);"
-            "  border-radius: 4px;"
-            "  color: #F3F4F6;"
-            "  font-size: 11px;"
-            "  font-weight: bold;"
-            "  padding: 3px 8px;"
-            "  min-height: 24px;"
-            "}"
-            "QPushButton:hover { background: #2563EB; border-color: #3B82F6; }"
-        )
-
         self._btn_zoom_out = QPushButton("−")
+        self._btn_zoom_out.setObjectName("toolBtn")
         self._btn_zoom_out.setToolTip("Diminuir Zoom (ou role o mouse para baixo)")
-        self._btn_zoom_out.setFixedWidth(28)
-        self._btn_zoom_out.setStyleSheet(btn_style)
+        self._btn_zoom_out.setFixedWidth(30)
         self._btn_zoom_out.clicked.connect(lambda: self._view.zoom_by(1.0 / 1.25))
         tb_layout.addWidget(self._btn_zoom_out)
 
         self._zoom_label = QLabel("100%")
         self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._zoom_label.setFixedWidth(46)
-        self._zoom_label.setStyleSheet("color: #9CA3AF; font-size: 11px; font-weight: bold;")
+        self._zoom_label.setObjectName("fieldLabel")
         tb_layout.addWidget(self._zoom_label)
 
         self._btn_zoom_in = QPushButton("+")
+        self._btn_zoom_in.setObjectName("toolBtn")
         self._btn_zoom_in.setToolTip("Aumentar Zoom (ou role o mouse para cima)")
-        self._btn_zoom_in.setFixedWidth(28)
-        self._btn_zoom_in.setStyleSheet(btn_style)
+        self._btn_zoom_in.setFixedWidth(30)
         self._btn_zoom_in.clicked.connect(lambda: self._view.zoom_by(1.25))
         tb_layout.addWidget(self._btn_zoom_in)
 
         self._btn_fit = QPushButton("Ajustar")
+        self._btn_fit.setObjectName("toolBtn")
         self._btn_fit.setToolTip("Ajustar imagem inteira na tela (ou clique duplo)")
-        self._btn_fit.setStyleSheet(btn_style)
         self._btn_fit.clicked.connect(self._view.fit_in_view)
         tb_layout.addWidget(self._btn_fit)
 
         self._btn_100 = QPushButton("1:1")
+        self._btn_100.setObjectName("toolBtn")
         self._btn_100.setToolTip("Tamanho real dos pixels (100%)")
-        self._btn_100.setStyleSheet(btn_style)
         self._btn_100.clicked.connect(self._view.zoom_100)
         tb_layout.addWidget(self._btn_100)
 
