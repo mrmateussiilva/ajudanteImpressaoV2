@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import cv2
+import numpy as np
+import math
+import ezdxf
+from ezdxf import units
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 Image.MAX_IMAGE_PIXELS = None  # Permitir processar imagens muito grandes
 
-from ..algorithms.image_ops import add_label_to_image, cm_to_px, process_images, rgba_to_white_background
-from ..algorithms.packing import build_canvas, pack_images_masked
+from ..algorithms.image_ops import add_label_to_image, cm_to_px, process_images, rgba_to_white_background, trim_empty_borders
+from ..algorithms.packing import build_canvas, pack_images_masked, _rotate_image
 
 
 PERFORMANCE_PROFILES = {
@@ -40,6 +47,11 @@ class RollerPackRequest:
     label_position: str
     label_date: str = ""                          # Data de envio (opcional)
     label_text_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # Cor do texto RGBA
+    # Parâmetros de corte DXF para Router CNC
+    dxf_bleed_mm: float = 0.0                    # Sangria em mm (0 = corte na borda exata da arte)
+    dxf_simplify_eps: float = 1.0                # Fator de simplificação Douglas-Peucker
+    dxf_include_border: bool = True              # Incluir retângulo do rolo na camada ROLO
+    dxf_layer_name: str = "CORTE"               # Nome da camada de corte no DXF
 
 
 @dataclass(slots=True)
@@ -87,6 +99,8 @@ def run_roll_packer(
     log_fn(f"  Perfil: {profile['label']}\n", "info")
     log_fn(f"  Step encaixe: {effective_step}px\n", "info")
     log_fn(f"  Rotacao automatica: {'SIM' if request.allow_rotate else 'NAO'}\n", "info")
+    if request.dxf_bleed_mm > 0:
+        log_fn(f"  DXF Sangria: {request.dxf_bleed_mm:.1f} mm\n", "info")
     log_fn(f"{'─' * 58}\n\n", "muted")
 
     if image_items is None:
@@ -107,10 +121,6 @@ def run_roll_packer(
         log_fn(f"    ✓ Debug do recorte salvo: {debug_cut_path.name}\n", "ok")
     except Exception as exc:
         log_fn(f"  ✗ Erro ao gerar debug do recorte: {exc}\n", "err")
-
-    # Aplicar rótulos dinâmicos de categoria nas imagens limpas antes de passar para o packer
-    from concurrent.futures import ThreadPoolExecutor
-    from functools import partial
 
     _label_fn = partial(
         add_label_to_image,
@@ -180,25 +190,25 @@ def run_roll_packer(
 
     # Limite do JPEG é 65535 pixels. Vamos usar 65000 por segurança.
     MAX_JPEG_DIM = 65000
-    
+
     if final_h > MAX_JPEG_DIM:
         log_fn(f"\n  ⚠  Imagem muito longa para um único JPEG ({final_h}px).\n", "warn")
         log_fn(f"  Dividindo em partes de no máximo {MAX_JPEG_DIM}px...\n", "info")
-        
+
         output_paths = []
         num_parts = (final_h + MAX_JPEG_DIM - 1) // MAX_JPEG_DIM
-        
+
         for i in range(num_parts):
             y0 = i * MAX_JPEG_DIM
             y1 = min((i + 1) * MAX_JPEG_DIM, final_h)
             part = final_jpeg.crop((0, y0, final_w, y1))
-            
+
             part_name = f"{output_path.stem}_parte{i+1}.jpg"
             part_path = output_path.parent / part_name
             part.save(str(part_path), format="JPEG", dpi=(100, 100), quality=profile["jpeg_quality"])
             output_paths.append(part_path)
             log_fn(f"    ✓ Parte {i+1} salva: {part_name}\n", "ok")
-        
+
         # Mantemos o output_path original como a primeira parte para compatibilidade
         output_path = output_paths[0]
     else:
@@ -212,17 +222,22 @@ def run_roll_packer(
     try:
         _generate_roll_dxf(
             packed=packed,
+            final_w=final_w,
             final_h=final_h,
             output_dxf_path=dxf_path,
             image_items=image_items,
             dpi=100,
+            bleed_mm=request.dxf_bleed_mm,
+            simplify_eps=request.dxf_simplify_eps,
+            include_border=request.dxf_include_border,
+            layer_name=request.dxf_layer_name,
         )
         log_fn(f"    ✓ DXF salvo: {dxf_path.name}\n", "ok")
     except Exception as exc:
         dxf_path = None
         log_fn(f"  ✗ Erro ao gerar DXF: {exc}\n", "err")
 
-    # Gerar imagem de debug com contornos
+    # Gerar imagem de debug com contornos — 100% fiel ao DXF
     status_fn("Gerando imagem de debug (contornos)...")
     debug_contour_path = output_path.with_name(output_path.stem + "_debug_contornos.png")
     try:
@@ -232,6 +247,8 @@ def run_roll_packer(
             final_h=final_h,
             output_path=debug_contour_path,
             image_items=image_items,
+            bleed_mm=request.dxf_bleed_mm,
+            simplify_eps=request.dxf_simplify_eps,
         )
         log_fn(f"    ✓ Debug de contornos salvo: {debug_contour_path.name}\n", "ok")
     except Exception as exc:
@@ -261,145 +278,226 @@ def run_roll_packer(
     )
 
 
+# ---------------------------------------------------------------------------
+# Extração de contornos (Pipeline V3 — corrigido para Router CNC)
+# ---------------------------------------------------------------------------
 
-def _extract_precise_contour(
+def _extract_piece_contours(
     clean_variant: Image.Image,
     x: int,
     y: int,
     alpha_threshold: int = 5,
-    simplify_eps: float = 0.45,
-) -> list[tuple[float, float]]:
-    """Extrai o contorno preciso da silhueta do elemento na imagem (Pipeline V2).
+    simplify_eps: float = 1.0,
+    bleed_mm: float = 0.0,
+    dpi: int = 100,
+    min_area_px: int = 200,
+) -> list[list[tuple[float, float]]]:
+    """Extrai TODOS os contornos visíveis de uma peça posicionada no canvas do rolo.
 
-    Estratégia atual:
-      - Usa o canal alfa como fonte primária da silhueta
-      - Evita blur para não deslocar a borda
-      - Simplifica bem menos que a versão anterior
-      - Só reduz a resolução quando a imagem é muito grande
+    Pipeline V3 (Router CNC):
+      - Borda de zeros adicionada (pad) ao redor da máscara antes de qualquer operação,
+        garantindo que o floodFill/morfologia NUNCA confunda a borda da imagem com
+        a borda da arte (bug que gerava retângulos no DXF anterior).
+      - Fechamento morfológico por raio proporcional ao tamanho da peça.
+      - Suporte a sangria morfológica (bleed) via dilatação paralela exata.
+      - Suporte a múltiplos contornos por peça (ex: personagens com acessórios soltos).
+      - Simplificação Douglas-Peucker adaptativa para gerar polilinhas limpas na CNC.
 
-    Retorna lista de pontos (roll_x, roll_y) na resolução real do canvas.
+    Retorna lista de contornos; cada contorno é uma lista de pontos (roll_x, roll_y)
+    em coordenadas reais do canvas do rolo (pixels, mesma escala do rolo impresso).
     """
     import cv2
     import numpy as np
 
-    alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
+    if clean_variant.mode != "RGBA":
+        clean_variant = clean_variant.convert("RGBA")
 
-    # 1. Threshold direto no alfa para preservar a borda real da arte
+    alpha = np.array(clean_variant.getchannel("A"), dtype=np.uint8)
     mask_bin = (alpha > alpha_threshold).astype(np.uint8) * 255
 
     if not mask_bin.any():
         return []
 
-    # 2. Reduz apenas quando a imagem é muito grande, para não destruir detalhe fino.
     orig_h, orig_w = mask_bin.shape
+
+    # ── 1. Downscale apenas para imagens muito grandes (>4000px) ────────────
     max_dim = max(orig_h, orig_w)
-    if max_dim > 3200:
-        scale_factor = max_dim / 3200.0
-        down_w = int(round(orig_w / scale_factor))
-        down_h = int(round(orig_h / scale_factor))
-        mask_proc = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
+    if max_dim > 4000:
+        scale_factor = max_dim / 4000.0
+        down_w = max(1, int(round(orig_w / scale_factor)))
+        down_h = max(1, int(round(orig_h / scale_factor)))
+        mask_work = cv2.resize(mask_bin, (down_w, down_h), interpolation=cv2.INTER_AREA)
     else:
         scale_factor = 1.0
-        mask_proc = mask_bin
+        mask_work = mask_bin
 
-    # 3. Fecha pequenos buracos internos sem empurrar a silhueta para fora.
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask_closed = cv2.morphologyEx(mask_proc, cv2.MORPH_CLOSE, kernel)
+    work_h, work_w = mask_work.shape
 
-    # 5. Fecha buracos internos via flood fill do exterior
-    flood = mask_closed.copy()
-    h_m, w_m = flood.shape
-    border_mask = np.zeros((h_m + 2, w_m + 2), np.uint8)
-    cv2.floodFill(flood, border_mask, (0, 0), 255)
-    holes = cv2.bitwise_not(flood)
-    mask_filled = cv2.bitwise_or(mask_closed, holes)
+    # ── 2. Padding de segurança: garante que a arte nunca toca a borda ──────
+    #    Sem isso, o floodFill a partir de (0,0) pode ficar bloqueado pela arte
+    #    e inverter tudo ao redor — gerando retângulos no DXF.
+    PAD = 8
+    padded = cv2.copyMakeBorder(
+        mask_work, PAD, PAD, PAD, PAD,
+        cv2.BORDER_CONSTANT, value=0
+    )
 
-    # 5. Mantém todos os pontos possíveis na captura do contorno externo
-    contours, _ = cv2.findContours(mask_filled, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
+    # ── 3. Fechamento morfológico para conectar lacunas finas (<3px) ────────
+    min_side = min(work_h, work_w)
+    close_r = max(2, min(12, int(round(min_side * 0.008))))
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * close_r + 1, 2 * close_r + 1))
+    closed = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, k_close)
+
+    # ── 4. Sangria morfológica (bleed) exata e paralela ─────────────────────
+    if bleed_mm > 0 and dpi > 0:
+        bleed_px_work = int(round((bleed_mm / 25.4) * (dpi / scale_factor)))
+        if bleed_px_work > 0:
+            k_bleed = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (2 * bleed_px_work + 1, 2 * bleed_px_work + 1)
+            )
+            closed = cv2.dilate(closed, k_bleed)
+
+    # ── 5. Extrai contornos externos ─────────────────────────────────────────
+    contours_raw, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours_raw:
         return []
 
-    main_contour = max(contours, key=cv2.contourArea)
+    result: list[list[tuple[float, float]]] = []
 
-    # 6. Simplificação conservadora. Se quiser o contorno cru, passe simplify_eps <= 0.
-    if simplify_eps > 0:
-        area = cv2.contourArea(main_contour)
-        epsilon = max(0.2, simplify_eps * np.sqrt(area) * 0.002)
-        simplified = cv2.approxPolyDP(main_contour, epsilon, True)
-    else:
-        simplified = main_contour
+    for cnt in contours_raw:
+        area = cv2.contourArea(cnt)
+        # Descarta ruídos muito pequenos
+        if area < min_area_px:
+            continue
 
-    # 7. Translada de volta para coordenadas do canvas real
-    points_roll = []
-    for pt in simplified:
-        local_x, local_y = pt[0]
-        orig_local_x = local_x * scale_factor
-        orig_local_y = local_y * scale_factor
-        points_roll.append((x + orig_local_x, y + orig_local_y))
+        # ── 6. Simplificação Douglas-Peucker adaptativa ──────────────────
+        if simplify_eps > 0:
+            arc = cv2.arcLength(cnt, True)
+            # Epsilon adaptativo: proporcional ao perímetro do contorno
+            epsilon = max(0.5, simplify_eps * arc / 500.0)
+            simplified = cv2.approxPolyDP(cnt, epsilon, True)
+        else:
+            simplified = cnt
 
-    return points_roll
+        if len(simplified) < 3:
+            continue
 
+        # ── 7. Converte para coordenadas reais do canvas do rolo ─────────
+        pts_roll: list[tuple[float, float]] = []
+        for pt in simplified:
+            # Compensar o padding e o downscale
+            local_x = (float(pt[0][0]) - PAD) * scale_factor
+            local_y = (float(pt[0][1]) - PAD) * scale_factor
+            # Clamp para não sair dos limites da imagem
+            local_x = max(0.0, min(local_x, float(orig_w - 1)))
+            local_y = max(0.0, min(local_y, float(orig_h - 1)))
+            pts_roll.append((x + local_x, y + local_y))
+
+        if len(pts_roll) >= 3:
+            result.append(pts_roll)
+
+    return result
 
 
 def _generate_roll_dxf(
     packed: list[tuple[Image.Image, int, int]],
+    final_w: int,
     final_h: int,
     output_dxf_path: Path,
     image_items: list[dict],
     dpi: int = 100,
-    simplify_eps: float = 0.8,
-    edge_sensitivity: int = 30,
+    bleed_mm: float = 0.0,
+    simplify_eps: float = 1.0,
+    include_border: bool = True,
     layer_name: str = "CORTE",
 ) -> Path:
-    """Extrai os contornos das imagens limpas originais e os gera no DXF final do rolo."""
-    import ezdxf
-    from ezdxf import units
-    from ..algorithms.image_ops import trim_empty_borders
-    from ..algorithms.packing import _rotate_image
+    """Gera o DXF de corte fiel ao rolo impresso.
+
+    Cada peça gera uma ou mais LWPOLYLINE fechadas na camada CORTE,
+    seguindo a silhueta real (contorno alfa) da arte — não retângulos.
+
+    Parâmetros:
+        packed:          Lista de (img, x, y) do resultado do packer
+        final_w/h:       Dimensões reais do canvas do rolo em pixels
+        output_dxf_path: Caminho de saída do arquivo .dxf
+        image_items:     Lista de dicionários com as artes originais (chave 'image')
+        dpi:             Resolução do rolo (100 DPI padrão)
+        bleed_mm:        Sangria em mm ao redor de cada contorno (0 = sem sangria)
+        simplify_eps:    Fator de simplificação Douglas-Peucker (menor = mais fiel)
+        include_border:  Se True, adiciona o retângulo total do rolo na camada ROLO
+        layer_name:      Nome da camada de corte (padrão: CORTE)
+    """
 
     doc = ezdxf.new(dxfversion="R2010")
     doc.units = units.MM
     msp = doc.modelspace()
-    doc.layers.add(layer_name, color=1)  # Vermelho padrão ACI
 
+    # Camadas
+    doc.layers.add(layer_name, color=1)       # Vermelho = corte (padrão CNC/CAD)
+    if include_border:
+        doc.layers.add("ROLO", color=3)       # Verde = limite da chapa/rolo
+
+    # ── Retângulo limite do rolo (referência de zeramento G54 na CNC) ───────
+    if include_border:
+        rolo_w_mm = (final_w / dpi) * 25.4
+        rolo_h_mm = (final_h / dpi) * 25.4
+        border_pts = [
+            (0.0,       0.0),
+            (rolo_w_mm, 0.0),
+            (rolo_w_mm, rolo_h_mm),
+            (0.0,       rolo_h_mm),
+        ]
+        msp.add_lwpolyline(
+            border_pts,
+            dxfattribs={"layer": "ROLO", "closed": True},
+        )
+
+    # ── Contornos das peças ──────────────────────────────────────────────────
     for img, x, y in packed:
         orig_id = img.info.get("_original_id", None)
         angle = img.info.get("_original_angle", 0)
 
+        # Usa sempre a imagem ORIGINAL limpa (sem rótulo) para extrair o contorno
         if orig_id is None or orig_id >= len(image_items):
-            clean_variant = img
+            clean_img_raw = img
         else:
-            clean_img = image_items[orig_id]["image"]
-            clean_cropped = trim_empty_borders(clean_img)
-            if angle != 0:
-                clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
-            else:
-                clean_variant = clean_cropped
+            clean_img_raw = image_items[orig_id]["image"]
+
+        clean_cropped = trim_empty_borders(clean_img_raw)
+        if angle != 0:
+            clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
+        else:
+            clean_variant = clean_cropped
 
         if clean_variant.mode != "RGBA":
             clean_variant = clean_variant.convert("RGBA")
 
-        # Chama a função de extração precisa unificada
-        points_roll = _extract_precise_contour(
+        # Extrai todos os contornos da peça (pode ter múltiplos para artes complexas)
+        all_contours = _extract_piece_contours(
             clean_variant=clean_variant,
             x=x,
             y=y,
             simplify_eps=simplify_eps,
+            bleed_mm=bleed_mm,
+            dpi=dpi,
         )
 
-        if len(points_roll) < 3:
-            continue
+        for pts_roll in all_contours:
+            if len(pts_roll) < 3:
+                continue
 
-        points_mm = []
-        for rx, ry in points_roll:
-            x_mm = (rx / dpi) * 25.4
-            y_mm = ((final_h - ry) / dpi) * 25.4
-            points_mm.append((x_mm, y_mm))
+            # Converte pixel → mm, invertendo Y para convenção CAD (Y↑)
+            points_mm = []
+            for rx, ry in pts_roll:
+                x_mm = (rx / dpi) * 25.4
+                y_mm = ((final_h - ry) / dpi) * 25.4
+                points_mm.append((x_mm, y_mm))
 
-        msp.add_lwpolyline(
-            points_mm,
-            dxfattribs={"layer": layer_name, "closed": True},
-        )
+            msp.add_lwpolyline(
+                points_mm,
+                dxfattribs={"layer": layer_name, "closed": True},
+            )
 
     output_dxf_path.parent.mkdir(parents=True, exist_ok=True)
     doc.saveas(str(output_dxf_path))
@@ -413,10 +511,6 @@ def _save_processed_contour_debug(
     columns: int = 4,
 ) -> None:
     """Salva uma prancha para auditar o recorte alfa antes do encaixe."""
-    import cv2
-    import math
-    import numpy as np
-    from PIL import ImageDraw, ImageFont
 
     if not image_items:
         return
@@ -480,16 +574,15 @@ def _save_debug_contours(
     final_h: int,
     output_path: Path,
     image_items: list[dict],
-    simplify_eps: float = 0.8,
+    bleed_mm: float = 0.0,
+    simplify_eps: float = 1.0,
     scale_down: int = 4,
 ) -> None:
-    """Gera uma imagem PNG de debug mostrando apenas os contornos das peças posicionadas no rolo.
-    Garante sincronia 100% fiel com o resultado que será salvo no DXF.
+    """Gera imagem PNG de debug com os contornos exatamente como irão para o DXF.
+
+    100% fiel ao _generate_roll_dxf: usa o mesmo extrator _extract_piece_contours
+    com os mesmos parâmetros, garantindo que o debug reflete o que a CNC vai cortar.
     """
-    import cv2
-    import numpy as np
-    from ..algorithms.image_ops import trim_empty_borders
-    from ..algorithms.packing import _rotate_image
 
     dbg_w = max(1, final_w // scale_down)
     dbg_h = max(1, final_h // scale_down)
@@ -514,65 +607,75 @@ def _save_debug_contours(
         angle = img.info.get("_original_angle", 0)
 
         if orig_id is None or orig_id >= len(image_items):
-            clean_variant = img
+            clean_img_raw = img
         else:
-            clean_img = image_items[orig_id]["image"]
-            clean_cropped = trim_empty_borders(clean_img)
-            if angle != 0:
-                clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
-            else:
-                clean_variant = clean_cropped
+            clean_img_raw = image_items[orig_id]["image"]
+
+        clean_cropped = trim_empty_borders(clean_img_raw)
+        if angle != 0:
+            clean_variant = trim_empty_borders(_rotate_image(clean_cropped, angle))
+        else:
+            clean_variant = clean_cropped
 
         if clean_variant.mode != "RGBA":
             clean_variant = clean_variant.convert("RGBA")
 
-        # Usa o mesmo extrator unificado
-        points_roll = _extract_precise_contour(
+        # Mesmo extrator do DXF — garante fidelidade 100%
+        all_contours = _extract_piece_contours(
             clean_variant=clean_variant,
             x=x,
             y=y,
             simplify_eps=simplify_eps,
+            bleed_mm=bleed_mm,
+            dpi=100,
         )
 
-        if len(points_roll) < 3:
-            continue
-
-        # Transforma pontos para a escala do canvas de debug
-        pts_debug = []
-        for rx, ry in points_roll:
-            dbg_x = int(round(rx * sf))
-            dbg_y = int(round(ry * sf))
-            pts_debug.append([dbg_x, dbg_y])
-
-        pts_np = np.array(pts_debug, dtype=np.int32).reshape((-1, 1, 2))
         color = PALETTE[idx % len(PALETTE)]
-
-        # Preenche área semitransparente
-        overlay = canvas.copy()
-        cv2.fillPoly(overlay, [pts_np], color=(color[0] // 5, color[1] // 5, color[2] // 5))
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
-
-        # Contorno com espessura proporcional ao tamanho do canvas
         thickness = max(1, dbg_w // 400)
-        cv2.polylines(canvas, [pts_np], isClosed=True, color=color, thickness=thickness)
 
-        # Desenha o número ID no centro do bounding box
-        bx, by, bw, bh = cv2.boundingRect(pts_np)
-        cx = bx + bw // 2
-        cy = by + bh // 2
-        label = str(idx)
-        font_scale = max(0.3, min(1.2, bw / 120))
-        cv2.putText(
-            canvas, label,
-            (cx - 6, cy + 6),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            color,
-            max(1, thickness),
-            cv2.LINE_AA,
-        )
+        for pts_roll in all_contours:
+            if len(pts_roll) < 3:
+                continue
 
-    from PIL import Image as PILImage
-    debug_img = PILImage.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+            pts_debug = []
+            for rx, ry in pts_roll:
+                dbg_x = int(round(rx * sf))
+                dbg_y = int(round(ry * sf))
+                dbg_x = max(0, min(dbg_x, dbg_w - 1))
+                dbg_y = max(0, min(dbg_y, dbg_h - 1))
+                pts_debug.append([dbg_x, dbg_y])
+
+            pts_np = np.array(pts_debug, dtype=np.int32).reshape((-1, 1, 2))
+
+            # Preenche área semitransparente
+            overlay = canvas.copy()
+            cv2.fillPoly(overlay, [pts_np], color=(color[0] // 5, color[1] // 5, color[2] // 5))
+            cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+
+            cv2.polylines(canvas, [pts_np], isClosed=True, color=color, thickness=thickness)
+
+        # Número do índice no centro do bounding box do primeiro contorno
+        if all_contours:
+            pts_all = []
+            for c in all_contours:
+                for rx, ry in c:
+                    pts_all.append([int(round(rx * sf)), int(round(ry * sf))])
+            if pts_all:
+                pts_all_np = np.array(pts_all, dtype=np.int32)
+                cx = int(pts_all_np[:, 0].mean())
+                cy = int(pts_all_np[:, 1].mean())
+                label = str(idx)
+                font_scale = max(0.4, min(1.4, dbg_w / 600))
+                cv2.putText(
+                    canvas, label,
+                    (cx - 6, cy + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    font_scale,
+                    color,
+                    max(1, thickness),
+                    cv2.LINE_AA,
+                )
+
+    debug_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     debug_img.save(str(output_path), format="PNG")

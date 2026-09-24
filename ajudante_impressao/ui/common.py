@@ -143,6 +143,19 @@ def pil_to_qpixmap(img: Image.Image) -> QPixmap:
     return QPixmap.fromImage(qimage)
 
 
+def _checkerboard_image(img: Image.Image, block: int = 16) -> Image.Image:
+    base = img.convert("RGBA")
+    checker = Image.new("RGBA", base.size, (30, 30, 30, 255))
+    for cy in range(0, base.height, block):
+        for cx in range(0, base.width, block):
+            if (cx // block + cy // block) % 2 == 0:
+                x1 = min(cx + block, base.width)
+                y1 = min(cy + block, base.height)
+                tile = Image.new("RGBA", (x1 - cx, y1 - cy), (50, 50, 50, 255))
+                checker.alpha_composite(tile, (cx, cy))
+    return Image.alpha_composite(checker, base)
+
+
 class _InteractiveGraphicsView(QGraphicsView):
     zoom_changed = Signal(float)
 

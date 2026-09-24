@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QDateEdit,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -33,27 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...services.roll_packer import PERFORMANCE_PROFILES, RollerPackRequest, RollerPackResult, run_roll_packer
-from ..common import ScreenScaffold, ZoomablePreviewWidget
-
-
-def _checkerboard_image(img: Image.Image, block: int = 16) -> Image.Image:
-    base = img.convert("RGBA")
-    checker = Image.new("RGBA", base.size, (30, 30, 30, 255))
-    for cy in range(0, base.height, block):
-        for cx in range(0, base.width, block):
-            if (cx // block + cy // block) % 2 == 0:
-                x1 = min(cx + block, base.width)
-                y1 = min(cy + block, base.height)
-                tile = Image.new("RGBA", (x1 - cx, y1 - cy), (50, 50, 50, 255))
-                checker.alpha_composite(tile, (cx, cy))
-    return Image.alpha_composite(checker, base)
-
-
-def pil_to_qpixmap(img: Image.Image) -> QPixmap:
-    rgba = img.convert("RGBA")
-    data = rgba.tobytes("raw", "RGBA")
-    qimage = QImage(data, rgba.width, rgba.height, rgba.width * 4, QImage.Format_RGBA8888).copy()
-    return QPixmap.fromImage(qimage)
+from ..common import ScreenScaffold, ZoomablePreviewWidget, _checkerboard_image, pil_to_qpixmap
 
 
 @dataclass(slots=True)
@@ -126,6 +107,7 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._debug_pixmaps: list[QPixmap] = []
         self._loaded_image_items: list[dict] = []
         self._label_text_color: tuple[int, int, int, int] = (0, 0, 0, 255)  # preto padrão
+        self._last_dxf_path: Path | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -251,6 +233,51 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         layout.addWidget(self.section_label("ARQUIVO DE SAIDA"))
         self.output_input = self._standalone_field(layout, "Nome do arquivo", "rolo_125cm.jpg")
 
+        # ── Painel CORTE CNC ──────────────────────────────────────────────────
+        layout.addWidget(self.section_label("CORTE CNC / DXF"))
+        cnc_box = QGroupBox()
+        cnc_layout = QVBoxLayout(cnc_box)
+        cnc_layout.setContentsMargins(14, 14, 14, 14)
+        cnc_layout.setSpacing(10)
+
+        cnc_layout.addWidget(self.field_label("Sangria de corte (mm)"))
+        self.dxf_bleed_spin = QDoubleSpinBox()
+        self.dxf_bleed_spin.setRange(0.0, 10.0)
+        self.dxf_bleed_spin.setSingleStep(0.5)
+        self.dxf_bleed_spin.setValue(0.0)
+        self.dxf_bleed_spin.setDecimals(1)
+        self.dxf_bleed_spin.setSuffix(" mm")
+        self.dxf_bleed_spin.setMinimumHeight(34)
+        self.dxf_bleed_spin.setToolTip(
+            "Expande o contorno de corte uniformemente em mm.\n"
+            "0 = corte na borda exata da arte.\n"
+            "Use 1-3 mm para não cortar a tinta."
+        )
+        cnc_layout.addWidget(self.dxf_bleed_spin)
+
+        cnc_layout.addWidget(self.field_label("Suavização das curvas (simplificação)"))
+        self.dxf_simplify_spin = QDoubleSpinBox()
+        self.dxf_simplify_spin.setRange(0.0, 10.0)
+        self.dxf_simplify_spin.setSingleStep(0.5)
+        self.dxf_simplify_spin.setValue(1.0)
+        self.dxf_simplify_spin.setDecimals(1)
+        self.dxf_simplify_spin.setMinimumHeight(34)
+        self.dxf_simplify_spin.setToolTip(
+            "Menor valor = mais pontos, mais fiel.\n"
+            "Maior valor = menos pontos, curvas mais suaves (melhor para CNC)."
+        )
+        cnc_layout.addWidget(self.dxf_simplify_spin)
+
+        self.dxf_border_checkbox = QCheckBox("Incluir limite do rolo no DXF (Camada ROLO)")
+        self.dxf_border_checkbox.setChecked(True)
+        self.dxf_border_checkbox.setToolTip(
+            "Adiciona o retângulo total do rolo como guia de zeramento\n"
+            "da origin (G54/X0Y0) na Router CNC."
+        )
+        cnc_layout.addWidget(self.dxf_border_checkbox)
+
+        layout.addWidget(cnc_box)
+
         layout.addStretch(1)
 
         self.run_button = QPushButton("GERAR ROLO")
@@ -258,6 +285,12 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self.run_button.setMinimumHeight(48)
         self.run_button.clicked.connect(self._run)
         layout.addWidget(self.run_button)
+
+        self.open_dxf_button = QPushButton("📂  Abrir DXF de Corte")
+        self.open_dxf_button.setMinimumHeight(38)
+        self.open_dxf_button.setEnabled(False)
+        self.open_dxf_button.clicked.connect(self._open_dxf)
+        layout.addWidget(self.open_dxf_button)
         return frame
 
     def _build_main(self) -> QWidget:
@@ -495,6 +528,9 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
             label_position=label_pos_value,
             label_date=label_date,
             label_text_color=self._label_text_color,
+            dxf_bleed_mm=self.dxf_bleed_spin.value(),
+            dxf_simplify_eps=self.dxf_simplify_spin.value(),
+            dxf_include_border=self.dxf_border_checkbox.isChecked(),
         )
 
         self.log_output.clear()
@@ -535,11 +571,32 @@ class RoloPackerWidget(QWidget, ScreenScaffold):
         self._show_preview(result.final_image, result=result)
         self._set_running(False)
 
+        # Habilita botão de abrir DXF se foi gerado com sucesso
+        if result.dxf_path is not None and result.dxf_path.exists():
+            self._last_dxf_path = result.dxf_path
+            self.open_dxf_button.setEnabled(True)
+        else:
+            self._last_dxf_path = None
+            self.open_dxf_button.setEnabled(False)
+
     def _handle_failed(self, message: str) -> None:
         self._append_log(f"\nErro inesperado: {message}\n", "err")
         self._set_status("Erro durante o processamento.")
         QMessageBox.critical(self, "Erro", message)
         self._set_running(False)
+
+    def _open_dxf(self) -> None:
+        """Abre o arquivo DXF no aplicativo padrão do sistema operacional."""
+        import subprocess
+        import os
+        if self._last_dxf_path and self._last_dxf_path.exists():
+            try:
+                os.startfile(str(self._last_dxf_path))
+            except Exception:
+                try:
+                    subprocess.Popen(["explorer", "/select,", str(self._last_dxf_path)])
+                except Exception as exc:
+                    QMessageBox.warning(self, "Erro", f"Não foi possível abrir o DXF:\n{exc}")
 
     def _cleanup_worker(self) -> None:
         if self._worker is not None:

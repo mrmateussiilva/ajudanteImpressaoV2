@@ -40,8 +40,6 @@ def _resolve_training_dir(default_windows_path: str, local_dirname: str) -> Path
 
     user_home = Path.home()
     linux_paths = [
-        Path("/home/mateus/Documentos/Projects/Pessoais/impressor") / local_dirname,
-        user_home / "Documentos/Projects/Pessoais/impressor" / local_dirname,
         Path(".") / local_dirname,
     ]
     for p in linux_paths:
