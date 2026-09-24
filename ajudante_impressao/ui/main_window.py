@@ -15,11 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .screens.classifier_manager import ClassifierManagerWidget
-from .screens.cut_panel import CutPanelWidget
-from .screens.hot_folder_screen import HotFolderWidget
 from .screens.roll_packer import RoloPackerWidget
-from .screens.totem_dxf import TotemDxfWidget
 from .theme import build_stylesheet
 
 
@@ -66,13 +62,8 @@ class AjudanteImpressaoQtApp(QMainWindow):
         header_layout.addWidget(subtitle)
         layout.addWidget(header)
 
-        self.tabs = QTabWidget()
-        self.tabs.addTab(RoloPackerWidget(), "Rolo Packer")
-        self.tabs.addTab(HotFolderWidget(), "🤖 Agente Monitorador")
-        self.tabs.addTab(ClassifierManagerWidget(), "🧠 Inteligência & Categorias")
-        self.tabs.addTab(CutPanelWidget(), "Cut Panel")
-        self.tabs.addTab(TotemDxfWidget(), "Totem DXF")
-        layout.addWidget(self.tabs, 1)
+        self.main_content = RoloPackerWidget()
+        layout.addWidget(self.main_content, 1)
 
     def _apply_theme(self, theme_name: str) -> None:
         self._theme = theme_name
