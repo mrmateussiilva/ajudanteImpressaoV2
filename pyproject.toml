@@ -16,5 +16,5 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "nuitka",
+    "nuitka>=4.2.2",
 ]
