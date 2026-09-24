@@ -13,3 +13,8 @@ dependencies = [
     "ezdxf>=1.4.4",
     "watchdog>=4.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "nuitka",
+]
